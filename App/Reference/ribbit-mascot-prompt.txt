@@ -1,0 +1,8 @@
+Use case: logo-brand
+Asset type: visual reference for a native macOS developer-tool mascot and app icon
+Primary request: Create a tiny, friendly pixel-art frog mascot named ribbit, matching the supplied Metra penguin icon's extremely reduced, blocky visual language and centered scale, while being unmistakably a frog.
+Subject: A front-facing squat frog with two raised eye bumps, dark square eyes, a broad simple mouth, compact feet, and a silhouette readable on a roughly 9-by-8 pixel grid.
+Style: True hard-edged pixel art, no anti-aliasing inside the sprite, very few large square pixels, utilitarian developer-tool character.
+Palette: Fresh green body, pale mint belly, near-black eyes, one restrained lime accent; no magenta in the subject.
+Background: Perfectly flat #ff00ff chroma key for local transparency removal.
+Constraints: One mascot only; no text, watermark, accessories, terminal, scenery, shadow, texture, or gradients; legible at 32 px.

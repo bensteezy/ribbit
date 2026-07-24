@@ -1,0 +1,42 @@
+:root {
+  --color-paper: oklch(12.8% 0.010 151);
+  --color-paper-2: oklch(16.5% 0.012 151);
+  --color-paper-3: oklch(18.5% 0.012 151);
+  --color-rule: oklch(25% 0.010 151);
+  --color-muted: oklch(66% 0.010 151);
+  --color-ink: oklch(94% 0.008 151);
+  --color-accent: oklch(81% 0.205 151);
+  --color-accent-ink: oklch(14% 0.015 151);
+  --color-focus: oklch(88% 0.175 151);
+  --color-danger: oklch(65% 0.205 25);
+
+  --font-display: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+  --font-body: "SF Pro Text", "Geist", ui-sans-serif, sans-serif;
+  --font-outlier: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  --text-xs: 0.64rem;
+  --text-sm: 0.8rem;
+  --text-base: 1rem;
+  --text-md: 1.25rem;
+  --text-lg: 1.5625rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+  --rule-thin: 1px;
+  --radius-sm: 0.4375rem;
+  --radius-window: 1rem;
+}

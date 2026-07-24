@@ -1,0 +1,9 @@
+.build/
+build/
+Vendor/GhosttyKit.xcframework/
+Vendor/GhosttyResources/
+.DS_Store
+.hallmark/
+__pycache__/
+*.py[cod]
+App/Reference/*-preview.png
