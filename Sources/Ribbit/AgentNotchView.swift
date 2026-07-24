@@ -3,30 +3,24 @@ import SwiftUI
 
 struct RibbitAgentNotchRootView: View {
     @ObservedObject var state: RibbitAgentNotchState
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .top) {
-                surface(in: proxy.size)
+                surface
 
                 RibbitExpandedNotchView(state: state)
-                    .opacity(state.isExpanded ? 1 : 0)
-                    .offset(y: state.isExpanded ? 0 : -3)
+                    .opacity(expandedContentOpacity)
+                    .offset(y: (1 - expandedContentOpacity) * -3)
                     .allowsHitTesting(state.isExpanded)
-                    .animation(
-                        contentAnimation?.delay(state.isExpanded ? 0.05 : 0),
-                        value: state.isExpanded
-                    )
 
                 RibbitCompactNotchView(state: state)
                     .frame(
                         width: proxy.size.width,
                         height: state.viewMetrics.headerHeight
                     )
-                    .opacity(state.isExpanded ? 0 : 1)
+                    .opacity(compactContentOpacity)
                     .allowsHitTesting(!state.isExpanded)
-                    .animation(contentAnimation, value: state.isExpanded)
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             .clipShape(surfaceShape)
@@ -56,16 +50,38 @@ struct RibbitAgentNotchRootView: View {
     }
 
     @ViewBuilder
-    private func surface(in size: CGSize) -> some View {
-        if state.viewMetrics.hasPhysicalNotch {
-            RibbitTopAttachedNotchShape()
-                .fill(Color.black)
-        } else {
-            RibbitFloatingNotchShape()
-            .fill(Color.black)
+    private var surface: some View {
+        if state.settings.glassySurfacesEnabled {
+            RibbitNotchGlassSurface(
+                opacity: state.settings.notchOpacity,
+                depth: state.settings.glassDepth,
+                blur: state.settings.notchBlur,
+                compactHeight: state.viewMetrics.headerHeight,
+                reveal: glassReveal,
+                material: .underWindowBackground,
+                blendingMode: .behindWindow
+            )
             .overlay {
+                surfaceShape
+                    .stroke(
+                        Color.white.opacity(
+                            glassReveal
+                                * (0.045 + state.settings.glassDepth * 0.065)
+                        ),
+                        lineWidth: 0.5
+                    )
+            }
+        } else {
+            if state.viewMetrics.hasPhysicalNotch {
+                RibbitTopAttachedNotchShape()
+                    .fill(Color.black)
+            } else {
                 RibbitFloatingNotchShape()
-                .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
+                .fill(Color.black)
+                .overlay {
+                    RibbitFloatingNotchShape()
+                    .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
+                }
             }
         }
     }
@@ -77,10 +93,25 @@ struct RibbitAgentNotchRootView: View {
         return AnyShape(RibbitFloatingNotchShape())
     }
 
-    private var contentAnimation: Animation? {
-        reduceMotion
-            ? nil
-            : .timingCurve(0.16, 1.0, 0.30, 1.0, duration: 0.22)
+    private var glassReveal: Double {
+        Double(Self.smoothstep(state.expansionProgress, from: 0.08, to: 0.74))
+    }
+
+    private var compactContentOpacity: Double {
+        Double(1 - Self.smoothstep(state.expansionProgress, from: 0.04, to: 0.28))
+    }
+
+    private var expandedContentOpacity: Double {
+        Double(Self.smoothstep(state.expansionProgress, from: 0.24, to: 0.68))
+    }
+
+    private static func smoothstep(
+        _ value: CGFloat,
+        from lower: CGFloat,
+        to upper: CGFloat
+    ) -> CGFloat {
+        let progress = min(max((value - lower) / (upper - lower), 0), 1)
+        return progress * progress * (3 - 2 * progress)
     }
 }
 

@@ -74,7 +74,8 @@ enum RibbitAgentNotchGeometry {
     static func expandedSize(
         for metrics: RibbitNotchScreenMetrics,
         displayedSessionCount: Int,
-        showsAttentionDetail: Bool
+        showsAttentionDetail: Bool,
+        contentWidth: CGFloat = expandedWidth
     ) -> CGSize {
         let physical = hasPhysicalNotch(metrics)
         let headerHeight = physical ? metrics.safeAreaTop : fallbackCompactSize.height
@@ -85,7 +86,7 @@ enum RibbitAgentNotchGeometry {
         let minimumWidth = physical ? hardwareNotchWidth(metrics) + 150 : 0
         return CGSize(
             width: min(
-                max(expandedWidth, minimumWidth) + expandedTopCornerRadius * 2,
+                max(contentWidth, minimumWidth) + expandedTopCornerRadius * 2,
                 max(320, metrics.frame.width - 32)
             ),
             height: headerHeight + bodyHeight
@@ -139,6 +140,20 @@ enum RibbitAgentNotchGeometry {
             width: width,
             height: height
         )
+    }
+
+    static func blackoutGradientStops(
+        surfaceHeight: CGFloat,
+        compactHeight: CGFloat
+    ) -> (solidEnd: CGFloat, fadeEnd: CGFloat) {
+        let height = max(surfaceHeight, 1)
+        let solidEnd = min(max(compactHeight / height, 0), 1)
+        let fadeDistance = min(max(height * 0.18, 32), 52)
+        let fadeEnd = min(
+            max((compactHeight + fadeDistance) / height, solidEnd),
+            1
+        )
+        return (solidEnd, fadeEnd)
     }
 
     private static func rounded(_ value: CGFloat, scale: CGFloat) -> CGFloat {

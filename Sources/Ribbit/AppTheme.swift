@@ -1,3 +1,6 @@
+// Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4
+// Hallmark · component: native glass controls · genre: atmospheric · theme: ribbit
+// States: native SwiftUI default · hover · focus · active · disabled · value feedback
 import AppKit
 import SwiftUI
 
@@ -27,6 +30,147 @@ enum RibbitTheme {
         static let md: CGFloat = 16
         static let lg: CGFloat = 24
         static let xl: CGFloat = 40
+    }
+}
+
+enum RibbitGlassCompositing {
+    static func expandedTintOpacity(opacity: Double, depth: Double) -> Double {
+        1 - clamp(depth) * (1 - clamp(opacity))
+    }
+
+    static func animatedTintOpacity(
+        opacity: Double,
+        depth: Double,
+        reveal: Double
+    ) -> Double {
+        let reveal = clamp(reveal)
+        return (1 - reveal)
+            + reveal * expandedTintOpacity(opacity: opacity, depth: depth)
+    }
+
+    static func effectIntensity(blur: Double, reveal: Double) -> Double {
+        clamp(blur) * clamp(reveal) * 0.72
+    }
+
+    static func sidebarTintOpacity(_ opacity: Double) -> Double {
+        clamp(opacity) * 0.92
+    }
+
+    static func sidebarEffectIntensity(_ blur: Double) -> Double {
+        clamp(blur) * 0.70
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        min(max(value, 0), 1)
+    }
+}
+
+struct RibbitGlassSurface: View {
+    let tint: Color
+    let opacity: Double
+    let depth: Double
+    let blur: Double
+    var reveal: Double = 1
+    var material: NSVisualEffectView.Material = .hudWindow
+    var blendingMode: NSVisualEffectView.BlendingMode = .withinWindow
+
+    var body: some View {
+        ZStack {
+            RibbitVisualEffectView(
+                material: material,
+                blendingMode: blendingMode,
+                intensity: RibbitGlassCompositing.effectIntensity(
+                    blur: blur,
+                    reveal: reveal
+                )
+            )
+            tint.opacity(
+                RibbitGlassCompositing.animatedTintOpacity(
+                    opacity: opacity,
+                    depth: depth,
+                    reveal: reveal
+                )
+            )
+            Color.white.opacity(
+                clampedDepth * clampedReveal * 0.035
+            )
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var clampedDepth: Double { min(max(depth, 0), 1) }
+    private var clampedReveal: Double { min(max(reveal, 0), 1) }
+}
+
+/// The production notch surface. Its top band always masks the physical
+/// display notch at full black; glass only begins below the compact height.
+struct RibbitNotchGlassSurface: View {
+    let opacity: Double
+    let depth: Double
+    let blur: Double
+    let compactHeight: CGFloat
+    var reveal: Double = 1
+    var material: NSVisualEffectView.Material = .underWindowBackground
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+
+    var body: some View {
+        GeometryReader { proxy in
+            let stops = RibbitAgentNotchGeometry.blackoutGradientStops(
+                surfaceHeight: proxy.size.height,
+                compactHeight: compactHeight
+            )
+
+            ZStack {
+                RibbitGlassSurface(
+                    tint: .black,
+                    opacity: opacity,
+                    depth: depth,
+                    blur: blur,
+                    reveal: reveal,
+                    material: material,
+                    blendingMode: blendingMode
+                )
+
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: stops.solidEnd),
+                        .init(color: .clear, location: stops.fadeEnd),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+struct RibbitSidebarGlassSurface: View {
+    let opacity: Double
+    let blur: Double
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+
+    var body: some View {
+        ZStack {
+            RibbitVisualEffectView(
+                material: .hudWindow,
+                blendingMode: blendingMode,
+                intensity: RibbitGlassCompositing.sidebarEffectIntensity(
+                    blur
+                )
+            )
+            Color.black.opacity(
+                RibbitGlassCompositing.sidebarTintOpacity(opacity)
+            )
+            Color.white.opacity(clampedOpacity * 0.018)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var clampedOpacity: Double {
+        min(max(opacity, 0), 1)
     }
 }
 

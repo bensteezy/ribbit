@@ -158,6 +158,7 @@ final class RibbitAgentNotchState: ObservableObject {
     @Published private(set) var presentation = RibbitNotchPresentationState()
     @Published private(set) var hiddenSessionIDs: Set<String> = []
     @Published private(set) var viewMetrics = RibbitAgentNotchViewMetrics()
+    @Published private(set) var expansionProgress: CGFloat = 0
 
     let settings: AppSettings
 
@@ -215,6 +216,13 @@ final class RibbitAgentNotchState: ObservableObject {
     func updateViewMetrics(_ metrics: RibbitAgentNotchViewMetrics) {
         if metrics != viewMetrics {
             viewMetrics = metrics
+        }
+    }
+
+    func updateExpansionProgress(_ progress: CGFloat) {
+        let clamped = min(max(progress, 0), 1)
+        if abs(clamped - expansionProgress) > 0.001 {
+            expansionProgress = clamped
         }
     }
 

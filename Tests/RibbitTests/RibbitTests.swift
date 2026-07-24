@@ -1339,6 +1339,10 @@ struct RibbitTests {
         settings.terminalTextSize = 19
         settings.editorTextSize = 18
         settings.filesTextSize = 12
+        settings.glassySurfacesEnabled = true
+        settings.sidebarOpacity = 0.65
+        settings.sidebarBlur = 0.55
+        settings.glassDepth = 0.75
         settings.notchMonitorEnabled = true
         settings.notchExpandOnHover = false
         settings.notchHoverDelay = 0.4
@@ -1347,6 +1351,9 @@ struct RibbitTests {
         settings.notchDisplayTarget = .followRibbit
         settings.notchShowActivityDetail = false
         settings.notchHideInFullScreen = true
+        settings.notchExpandedWidth = .wide
+        settings.notchOpacity = 0.7
+        settings.notchBlur = 0.45
 
         let restored = AppSettings(defaults: defaults)
         #expect(restored.colorScheme == .midnight)
@@ -1355,6 +1362,10 @@ struct RibbitTests {
         #expect(restored.terminalTextSize == 19)
         #expect(restored.editorTextSize == 18)
         #expect(restored.filesTextSize == 12)
+        #expect(restored.glassySurfacesEnabled)
+        #expect(restored.sidebarOpacity == 0.65)
+        #expect(restored.sidebarBlur == 0.55)
+        #expect(restored.glassDepth == 0.75)
         #expect(restored.notchMonitorEnabled)
         #expect(!restored.notchExpandOnHover)
         #expect(restored.notchHoverDelay == 0.4)
@@ -1363,6 +1374,9 @@ struct RibbitTests {
         #expect(restored.notchDisplayTarget == .followRibbit)
         #expect(!restored.notchShowActivityDetail)
         #expect(restored.notchHideInFullScreen)
+        #expect(restored.notchExpandedWidth == .wide)
+        #expect(restored.notchOpacity == 0.7)
+        #expect(restored.notchBlur == 0.45)
 
         let model = AppModel(
             projectURL: URL(fileURLWithPath: "/tmp"),
@@ -1371,6 +1385,19 @@ struct RibbitTests {
         )
         let session = try #require(model.selectedTab?.terminalSession)
         #expect(session.view.font.pointSize == 19)
+    }
+
+    @Test func blurSettingsPreserveExistingGlassStrengthOnUpgrade() throws {
+        let suiteName = "ribbit-blur-migration-tests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(0.40, forKey: "appearance.sidebarOpacity")
+        defaults.set(0.25, forKey: "appearance.glassDepth")
+
+        let settings = AppSettings(defaults: defaults)
+        #expect(abs(settings.sidebarBlur - (0.40 * 0.55 / 0.70)) < 0.000_001)
+        #expect(abs(settings.notchBlur - (0.25 * 0.58 / 0.72)) < 0.000_001)
     }
 
     @Test func ribbitHereCreatesNotesAndPersistsProject() throws {
@@ -2611,6 +2638,99 @@ struct RibbitTests {
         #expect(samples.last == 1)
         #expect(zip(samples, samples.dropFirst()).allSatisfy { $0 <= $1 })
         #expect(samples.allSatisfy { (0...1).contains($0) })
+    }
+
+    @Test func notchExpandedWidthPresetsOnlyChangeTheOpenGeometry() {
+        let metrics = RibbitNotchScreenMetrics(
+            frame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+            visibleFrame: CGRect(x: 0, y: 40, width: 1512, height: 904),
+            safeAreaTop: 38,
+            auxiliaryTopLeftArea: CGRect(x: 0, y: 944, width: 650, height: 38),
+            auxiliaryTopRightArea: CGRect(x: 862, y: 944, width: 650, height: 38),
+            backingScaleFactor: 2
+        )
+        let compact = RibbitAgentNotchGeometry.compactSize(for: metrics)
+        let widths = RibbitNotchExpandedWidth.allCases.map {
+            RibbitAgentNotchGeometry.expandedSize(
+                for: metrics,
+                displayedSessionCount: 2,
+                showsAttentionDetail: false,
+                contentWidth: $0.contentWidth
+            ).width
+        }
+
+        #expect(compact == CGSize(width: 280, height: 38))
+        #expect(widths == [518, 650, 782, 914])
+    }
+
+    @Test func notchGlassKeepsCompactBlackAndSeparatesDepthFromOpacity() {
+        #expect(
+            RibbitGlassCompositing.animatedTintOpacity(
+                opacity: 0,
+                depth: 1,
+                reveal: 0
+            ) == 1
+        )
+        #expect(
+            RibbitGlassCompositing.expandedTintOpacity(
+                opacity: 0,
+                depth: 0
+            ) == 1
+        )
+        #expect(
+            RibbitGlassCompositing.expandedTintOpacity(
+                opacity: 0,
+                depth: 1
+            ) == 0
+        )
+        #expect(
+            RibbitGlassCompositing.expandedTintOpacity(
+                opacity: 0.35,
+                depth: 1
+            ) == 0.35
+        )
+        #expect(
+            RibbitGlassCompositing.expandedTintOpacity(
+                opacity: 1,
+                depth: 1
+            ) == 1
+        )
+    }
+
+    @Test func openNotchKeepsTheCollapsedPixelHeightBlackBeforeFading() {
+        let compact = RibbitAgentNotchGeometry.blackoutGradientStops(
+            surfaceHeight: 38,
+            compactHeight: 38
+        )
+        #expect(compact.solidEnd == 1)
+        #expect(compact.fadeEnd == 1)
+
+        let expanded = RibbitAgentNotchGeometry.blackoutGradientStops(
+            surfaceHeight: 208,
+            compactHeight: 38
+        )
+        #expect(expanded.solidEnd == 38.0 / 208.0)
+        #expect(expanded.fadeEnd > expanded.solidEnd)
+        #expect(expanded.fadeEnd < 1)
+    }
+
+    @Test func opacityAndBlurAreIndependentForGlassSurfaces() {
+        #expect(RibbitGlassCompositing.sidebarTintOpacity(0) == 0)
+        #expect(RibbitGlassCompositing.sidebarEffectIntensity(0) == 0)
+        #expect(RibbitGlassCompositing.sidebarTintOpacity(1) == 0.92)
+        #expect(RibbitGlassCompositing.sidebarEffectIntensity(1) == 0.70)
+        #expect(
+            RibbitGlassCompositing.effectIntensity(
+                blur: 0,
+                reveal: 1
+            ) == 0
+        )
+        #expect(
+            RibbitGlassCompositing.effectIntensity(
+                blur: 1,
+                reveal: 1
+            ) == 0.72
+        )
     }
 
     @Test func notchCornerRadiusGrowsIntoAContinuousExpandedSilhouette() {

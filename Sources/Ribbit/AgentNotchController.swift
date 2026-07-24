@@ -18,6 +18,8 @@ final class RibbitAgentNotchController: NSObject {
     private var frameAnimationStartedAt: CFTimeInterval = 0
     private var frameAnimationDuration: CFTimeInterval = 0
     private var frameAnimationIsExpanding = false
+    private var frameAnimationSurfaceStart: CGFloat = 0
+    private var frameAnimationSurfaceTarget: CGFloat = 0
     private weak var lastTargetScreen: NSScreen?
     private var isStarted = false
 
@@ -137,7 +139,8 @@ final class RibbitAgentNotchController: NSObject {
             ? RibbitAgentNotchGeometry.expandedSize(
                 for: metrics,
                 displayedSessionCount: state.projection.displayedSessions.count,
-                showsAttentionDetail: state.projection.primaryAttention != nil
+                showsAttentionDetail: state.projection.primaryAttention != nil,
+                contentWidth: settings.notchExpandedWidth.contentWidth
             )
             : RibbitAgentNotchGeometry.compactSize(for: metrics)
         let targetFrame = RibbitAgentNotchGeometry.topAnchoredFrame(
@@ -154,6 +157,7 @@ final class RibbitAgentNotchController: NSObject {
         } else {
             cancelFrameAnimation()
             apply(targetFrame)
+            state.updateExpansionProgress(state.isExpanded ? 1 : 0)
         }
         panel.hasPresented = true
         panel.orderFrontRegardless()
@@ -204,6 +208,8 @@ final class RibbitAgentNotchController: NSObject {
         frameAnimationScreen = screen
         frameAnimationStartedAt = CACurrentMediaTime()
         frameAnimationIsExpanding = targetFrame.height > startFrame.height
+        frameAnimationSurfaceStart = state.expansionProgress
+        frameAnimationSurfaceTarget = state.isExpanded ? 1 : 0
         frameAnimationDuration = frameAnimationIsExpanding ? 0.32 : 0.24
 
         let displayLink = screen.displayLink(
@@ -239,9 +245,14 @@ final class RibbitAgentNotchController: NSObject {
         )
         let metrics = RibbitNotchScreenMetrics(screen: screen)
         apply(RibbitAgentNotchGeometry.topAnchoredFrame(size: size, on: metrics))
+        state.updateExpansionProgress(
+            frameAnimationSurfaceStart
+                + (frameAnimationSurfaceTarget - frameAnimationSurfaceStart) * eased
+        )
 
         if linear >= 1 {
             apply(frameAnimationTarget)
+            state.updateExpansionProgress(frameAnimationSurfaceTarget)
             cancelFrameAnimation()
         }
     }

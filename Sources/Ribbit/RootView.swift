@@ -38,7 +38,11 @@ struct RootView: View {
                 FileInspector(model: model, settings: settings, metrics: metrics)
                     .frame(width: metrics.inspectorWidth)
             }
-            .background(RibbitTheme.canvas)
+            .background(
+                settings.glassySurfacesEnabled
+                    ? Color.clear
+                    : RibbitTheme.canvas
+            )
             .font(.system(size: settings.tabTextSize, weight: .regular, design: .default))
         }
         .ignoresSafeArea(.container, edges: .top)
@@ -316,7 +320,17 @@ private struct ProjectRail: View {
             .padding(.horizontal, RibbitTheme.Space.xs)
         }
         .font(.system(size: settings.projectRailTextSize))
-        .background(RibbitTheme.sidebar)
+        .background {
+            if settings.glassySurfacesEnabled {
+                RibbitSidebarGlassSurface(
+                    opacity: settings.sidebarOpacity,
+                    blur: settings.sidebarBlur,
+                    blendingMode: .behindWindow
+                )
+            } else {
+                RibbitTheme.sidebar
+            }
+        }
     }
 }
 

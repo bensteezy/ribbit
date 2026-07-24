@@ -23,6 +23,15 @@ runs the Swift suite, sends 21 editing/navigation chords through both a direct
 PTY and an isolated tmux client, builds and signs the app, and verifies the
 bundled third-party licenses.
 
+Create a branded drag-to-install disk image from the built app:
+
+```sh
+./scripts/build-dmg.sh
+```
+
+The versioned DMG is written to `build/`. You can also pass an app bundle and
+output path explicitly: `./scripts/build-dmg.sh path/to/Ribbit.app out.dmg`.
+
 ## projects
 
 - choose `new project…` to create a folder with a `ribbit-notes/` directory

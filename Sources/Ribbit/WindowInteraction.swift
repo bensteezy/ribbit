@@ -33,7 +33,9 @@ enum RibbitWindowConfigurator {
         // the same workspace instead of losing the focus target.
         window.isReleasedWhenClosed = false
 
-        window.backgroundColor = RibbitTheme.nsCanvas
+        let usesGlass = AppSettings.shared.glassySurfacesEnabled
+        window.isOpaque = !usesGlass
+        window.backgroundColor = usesGlass ? .clear : RibbitTheme.nsCanvas
         window.minSize = NSSize(width: 720, height: 520)
         window.setContentSize(NSSize(width: 1440, height: 900))
         window.center()

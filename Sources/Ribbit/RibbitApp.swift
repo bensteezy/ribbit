@@ -115,6 +115,11 @@ private struct RibbitSceneRoot: View {
                     RibbitWindowConfigurator.configureMainSceneWindows()
                 }
             }
+            .onChange(of: settings.glassySurfacesEnabled) {
+                DispatchQueue.main.async {
+                    RibbitWindowConfigurator.configureMainSceneWindows()
+                }
+            }
     }
 }
 

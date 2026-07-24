@@ -24,7 +24,7 @@ struct FileInspector: View {
 
             files
         }
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.55))
+        .background(RibbitTheme.canvas)
     }
 
     private var files: some View {

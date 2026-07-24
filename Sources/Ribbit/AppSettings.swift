@@ -56,6 +56,24 @@ enum RibbitNotchDisplayTarget: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum RibbitNotchExpandedWidth: String, CaseIterable, Identifiable {
+    case slim
+    case standard
+    case wide
+    case ultra
+
+    var id: String { rawValue }
+
+    var contentWidth: CGFloat {
+        switch self {
+        case .slim: 480
+        case .standard: 612
+        case .wide: 744
+        case .ultra: 876
+        }
+    }
+}
+
 struct RibbitPalette {
     let canvas: NSColor
     let surface: NSColor
@@ -88,6 +106,23 @@ final class AppSettings: ObservableObject {
     }
     @Published var filesTextSize: Double {
         didSet { defaults.set(filesTextSize, forKey: Keys.filesTextSize) }
+    }
+    @Published var glassySurfacesEnabled: Bool {
+        didSet {
+            defaults.set(
+                glassySurfacesEnabled,
+                forKey: Keys.glassySurfacesEnabled
+            )
+        }
+    }
+    @Published var sidebarOpacity: Double {
+        didSet { defaults.set(sidebarOpacity, forKey: Keys.sidebarOpacity) }
+    }
+    @Published var sidebarBlur: Double {
+        didSet { defaults.set(sidebarBlur, forKey: Keys.sidebarBlur) }
+    }
+    @Published var glassDepth: Double {
+        didSet { defaults.set(glassDepth, forKey: Keys.glassDepth) }
     }
     @Published var agentNotificationsEnabled: Bool {
         didSet {
@@ -138,6 +173,20 @@ final class AppSettings: ObservableObject {
             )
         }
     }
+    @Published var notchExpandedWidth: RibbitNotchExpandedWidth {
+        didSet {
+            defaults.set(
+                notchExpandedWidth.rawValue,
+                forKey: Keys.notchExpandedWidth
+            )
+        }
+    }
+    @Published var notchOpacity: Double {
+        didSet { defaults.set(notchOpacity, forKey: Keys.notchOpacity) }
+    }
+    @Published var notchBlur: Double {
+        didSet { defaults.set(notchBlur, forKey: Keys.notchBlur) }
+    }
 
     private let defaults: UserDefaults
 
@@ -152,6 +201,28 @@ final class AppSettings: ObservableObject {
             ? 14 : defaults.double(forKey: Keys.terminalTextSize)
         editorTextSize = Self.savedSize(defaults, key: Keys.editorTextSize, fallback: 14)
         filesTextSize = Self.savedSize(defaults, key: Keys.filesTextSize, fallback: max(10, legacyInterfaceSize - 1))
+        glassySurfacesEnabled = Self.savedBool(
+            defaults,
+            key: Keys.glassySurfacesEnabled,
+            fallback: false
+        )
+        let savedSidebarOpacity = Self.savedUnitInterval(
+            defaults,
+            key: Keys.sidebarOpacity,
+            fallback: 0.82
+        )
+        sidebarOpacity = savedSidebarOpacity
+        sidebarBlur = Self.savedUnitInterval(
+            defaults,
+            key: Keys.sidebarBlur,
+            fallback: savedSidebarOpacity * 0.55 / 0.70
+        )
+        let savedGlassDepth = Self.savedUnitInterval(
+            defaults,
+            key: Keys.glassDepth,
+            fallback: 0.62
+        )
+        glassDepth = savedGlassDepth
         agentNotificationsEnabled = defaults.bool(forKey: Keys.agentNotificationsEnabled)
         notchMonitorEnabled = Self.savedBool(
             defaults,
@@ -191,6 +262,19 @@ final class AppSettings: ObservableObject {
             key: Keys.notchHideInFullScreen,
             fallback: false
         )
+        notchExpandedWidth = RibbitNotchExpandedWidth(
+            rawValue: defaults.string(forKey: Keys.notchExpandedWidth) ?? ""
+        ) ?? .standard
+        notchOpacity = Self.savedUnitInterval(
+            defaults,
+            key: Keys.notchOpacity,
+            fallback: 0.78
+        )
+        notchBlur = Self.savedUnitInterval(
+            defaults,
+            key: Keys.notchBlur,
+            fallback: savedGlassDepth * 0.58 / 0.72
+        )
     }
 
     func reset() {
@@ -200,6 +284,10 @@ final class AppSettings: ObservableObject {
         terminalTextSize = 14
         editorTextSize = 14
         filesTextSize = 11
+        glassySurfacesEnabled = false
+        sidebarOpacity = 0.82
+        sidebarBlur = 0.64
+        glassDepth = 0.62
         agentNotificationsEnabled = false
         notchMonitorEnabled = Self.hasPhysicalNotch
         notchExpandOnHover = true
@@ -209,6 +297,9 @@ final class AppSettings: ObservableObject {
         notchDisplayTarget = .builtIn
         notchShowActivityDetail = true
         notchHideInFullScreen = false
+        notchExpandedWidth = .standard
+        notchOpacity = 0.78
+        notchBlur = 0.50
     }
 
     private static func savedSize(_ defaults: UserDefaults, key: String, fallback: Double) -> Double {
@@ -231,6 +322,14 @@ final class AppSettings: ObservableObject {
         defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
     }
 
+    private static func savedUnitInterval(
+        _ defaults: UserDefaults,
+        key: String,
+        fallback: Double
+    ) -> Double {
+        min(max(savedDouble(defaults, key: key, fallback: fallback), 0), 1)
+    }
+
     private static var hasPhysicalNotch: Bool {
         NSScreen.screens.contains {
             $0.safeAreaInsets.top > 0
@@ -247,6 +346,10 @@ final class AppSettings: ObservableObject {
         static let terminalTextSize = "appearance.terminalTextSize"
         static let editorTextSize = "appearance.editorTextSize"
         static let filesTextSize = "appearance.filesTextSize"
+        static let glassySurfacesEnabled = "appearance.glassySurfacesEnabled"
+        static let sidebarOpacity = "appearance.sidebarOpacity"
+        static let sidebarBlur = "appearance.sidebarBlur"
+        static let glassDepth = "appearance.glassDepth"
         static let agentNotificationsEnabled = "agents.notificationsEnabled"
         static let notchMonitorEnabled = "agents.notch.enabled"
         static let notchExpandOnHover = "agents.notch.expandOnHover"
@@ -256,10 +359,13 @@ final class AppSettings: ObservableObject {
         static let notchDisplayTarget = "agents.notch.displayTarget"
         static let notchShowActivityDetail = "agents.notch.showActivityDetail"
         static let notchHideInFullScreen = "agents.notch.hideInFullScreen"
+        static let notchExpandedWidth = "agents.notch.expandedWidth"
+        static let notchOpacity = "agents.notch.opacity"
+        static let notchBlur = "agents.notch.blur"
     }
 }
 
-struct SettingsView: View {
+struct LegacySettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject private var tmuxStatus: TmuxStatusModel
     @StateObject private var agentHooks = RibbitAgentHookStatusModel()
@@ -284,6 +390,33 @@ struct SettingsView: View {
                 TextSizeSettingRow("note editor", value: $settings.editorTextSize, range: 11...22)
                 TextSizeSettingRow("files pane", value: $settings.filesTextSize, range: 9...16)
 
+                Toggle(
+                    "use dark glass surfaces",
+                    isOn: $settings.glassySurfacesEnabled
+                )
+
+                OpacitySettingRow(
+                    "side panel opacity",
+                    value: $settings.sidebarOpacity
+                )
+                .disabled(!settings.glassySurfacesEnabled)
+
+                OpacitySettingRow(
+                    "side panel background blur",
+                    value: $settings.sidebarBlur
+                )
+                .disabled(!settings.glassySurfacesEnabled)
+
+                OpacitySettingRow(
+                    "glass depth",
+                    value: $settings.glassDepth
+                )
+                .disabled(!settings.glassySurfacesEnabled)
+
+                Text("Glass styling is optional. Opacity changes update the project side panel and agent monitor immediately.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(RibbitTheme.muted)
+
                 HStack {
                     Spacer()
                     Button("restore defaults") { settings.reset() }
@@ -305,7 +438,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .frame(width: 520, height: 700)
+        .frame(width: 540, height: 760)
         .preferredColorScheme(.dark)
     }
 }
@@ -342,6 +475,32 @@ private struct AgentNotchSettingsSection: View {
                 isOn: $settings.notchAutoCollapse
             )
             .disabled(!settings.notchMonitorEnabled)
+
+            Picker("expanded width", selection: $settings.notchExpandedWidth) {
+                ForEach(RibbitNotchExpandedWidth.allCases) { width in
+                    Text(width.rawValue).tag(width)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!settings.notchMonitorEnabled)
+
+            OpacitySettingRow(
+                "notch opacity",
+                value: $settings.notchOpacity
+            )
+            .disabled(
+                !settings.notchMonitorEnabled
+                    || !settings.glassySurfacesEnabled
+            )
+
+            OpacitySettingRow(
+                "notch background blur",
+                value: $settings.notchBlur
+            )
+            .disabled(
+                !settings.notchMonitorEnabled
+                    || !settings.glassySurfacesEnabled
+            )
 
             LabeledContent("attention reveal") {
                 Picker("", selection: $settings.notchAttentionRevealDwell) {
@@ -489,6 +648,28 @@ private struct TextSizeSettingRow: View {
                 Text("\(Int(value)) pt")
                     .monospacedDigit()
                     .frame(width: 38, alignment: .trailing)
+            }
+        }
+    }
+}
+
+private struct OpacitySettingRow: View {
+    let title: String
+    @Binding var value: Double
+
+    init(_ title: String, value: Binding<Double>) {
+        self.title = title
+        _value = value
+    }
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 12) {
+                Slider(value: $value, in: 0...1, step: 0.05)
+                    .frame(width: 190)
+                Text(value, format: .percent.precision(.fractionLength(0)))
+                    .monospacedDigit()
+                    .frame(width: 42, alignment: .trailing)
             }
         }
     }
