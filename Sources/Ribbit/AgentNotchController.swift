@@ -139,7 +139,7 @@ final class RibbitAgentNotchController: NSObject {
             ? RibbitAgentNotchGeometry.expandedSize(
                 for: metrics,
                 displayedSessionCount: state.projection.displayedSessions.count,
-                showsAttentionDetail: state.projection.primaryAttention != nil,
+                detailHeight: state.detailPanelHeight,
                 contentWidth: settings.notchExpandedWidth.contentWidth
             )
             : RibbitAgentNotchGeometry.compactSize(for: metrics)

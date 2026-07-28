@@ -159,6 +159,9 @@ final class RibbitAgentNotchState: ObservableObject {
     @Published private(set) var hiddenSessionIDs: Set<String> = []
     @Published private(set) var viewMetrics = RibbitAgentNotchViewMetrics()
     @Published private(set) var expansionProgress: CGFloat = 0
+    @Published private(set) var approvalRequests: [RibbitApprovalRequest] = []
+    @Published private(set) var conversationItemsBySessionID:
+        [String: [RibbitConversationItem]] = [:]
 
     let settings: AppSettings
 
@@ -191,6 +194,8 @@ final class RibbitAgentNotchState: ObservableObject {
             .appendingPathComponent("notch-dismissals.json")
         previousSessions = monitor.sessions
         projection = RibbitAgentNotchProjection(sessions: monitor.sessions)
+        approvalRequests = monitor.approvalRequests
+        conversationItemsBySessionID = monitor.conversationItemsBySessionID
         loadDismissals()
         refresh(with: monitor.sessions, revealsAttention: false)
 
@@ -199,6 +204,22 @@ final class RibbitAgentNotchState: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] sessions in
                 self?.refresh(with: sessions, revealsAttention: true)
+            }
+            .store(in: &cancellables)
+
+        monitor.$approvalRequests
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] requests in
+                self?.approvalRequests = requests
+            }
+            .store(in: &cancellables)
+
+        monitor.$conversationItemsBySessionID
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] items in
+                self?.conversationItemsBySessionID = items
             }
             .store(in: &cancellables)
 
@@ -212,6 +233,44 @@ final class RibbitAgentNotchState: ObservableObject {
 
     var isExpanded: Bool { presentation.isExpanded }
     var isPinned: Bool { presentation.isPinned }
+    var detailSession: RibbitAgentSession? {
+        if let primaryAttention = projection.primaryAttention {
+            return primaryAttention
+        }
+        return projection.displayedSessions
+            .filter { !(conversationItemsBySessionID[$0.id] ?? []).isEmpty }
+            .max {
+                let left = conversationItemsBySessionID[$0.id]?.last?.createdAt
+                    ?? .distantPast
+                let right = conversationItemsBySessionID[$1.id]?.last?.createdAt
+                    ?? .distantPast
+                return left < right
+            }
+    }
+    var detailPanelHeight: CGFloat {
+        guard let detailSession else { return 0 }
+        return detailSession.needsAttention
+            ? RibbitAgentNotchGeometry.attentionDetailHeight
+            : RibbitAgentNotchGeometry.conversationDetailHeight
+    }
+
+    func approval(for session: RibbitAgentSession) -> RibbitApprovalRequest? {
+        approvalRequests.first { $0.sessionID == session.id }
+    }
+
+    func recentConversation(
+        for session: RibbitAgentSession,
+        limit: Int = 3
+    ) -> [RibbitConversationItem] {
+        Array((conversationItemsBySessionID[session.id] ?? []).suffix(limit))
+    }
+
+    func resolveApproval(
+        _ request: RibbitApprovalRequest,
+        decision: RibbitApprovalDecision
+    ) {
+        monitor.resolveApproval(request, decision: decision)
+    }
 
     func updateViewMetrics(_ metrics: RibbitAgentNotchViewMetrics) {
         if metrics != viewMetrics {

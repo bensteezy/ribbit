@@ -93,8 +93,6 @@ PTY, terminal emulation, and Metal rendering.
   use the pin button, or drag one onto the canvas
 - external-agent canvas pins retain their project, position, latest status, and
   focus target across relaunches
-- terminals, notes, and pinned agents can be grouped from a node menu; the
-  labeled canvas boundary and membership persist with the project
 - existing Noot agent state is imported once into ribbit without deleting or modifying the Noot files
 - hook installation is always an explicit action in Settings
 

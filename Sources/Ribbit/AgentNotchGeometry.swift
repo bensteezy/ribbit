@@ -43,7 +43,8 @@ enum RibbitAgentNotchGeometry {
     static let expandedSurfaceCornerRadius: CGFloat = 24
     static let expandedWidth: CGFloat = 612
     static let rowHeight: CGFloat = 54
-    static let attentionDetailHeight: CGFloat = 142
+    static let attentionDetailHeight: CGFloat = 156
+    static let conversationDetailHeight: CGFloat = 54
     static let fallbackCompactSize = CGSize(width: 112, height: 30)
 
     static func hasPhysicalNotch(_ metrics: RibbitNotchScreenMetrics) -> Bool {
@@ -74,14 +75,14 @@ enum RibbitAgentNotchGeometry {
     static func expandedSize(
         for metrics: RibbitNotchScreenMetrics,
         displayedSessionCount: Int,
-        showsAttentionDetail: Bool,
+        detailHeight: CGFloat = 0,
         contentWidth: CGFloat = expandedWidth
     ) -> CGSize {
         let physical = hasPhysicalNotch(metrics)
         let headerHeight = physical ? metrics.safeAreaTop : fallbackCompactSize.height
         let rowCount = min(max(displayedSessionCount, 1), 5)
         let bodyHeight = CGFloat(rowCount) * rowHeight
-            + (showsAttentionDetail ? attentionDetailHeight : 0)
+            + detailHeight
             + 8
         let minimumWidth = physical ? hardwareNotchWidth(metrics) + 150 : 0
         return CGSize(

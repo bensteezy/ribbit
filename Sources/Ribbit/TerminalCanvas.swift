@@ -4,14 +4,26 @@ import SwiftUI
 struct TerminalCanvasWorkspace: View {
     @ObservedObject var model: AppModel
     @ObservedObject var settings: AppSettings
+    @ObservedObject private var agentMonitor: RibbitAgentMonitor
+    let viewportSize: CGSize
 
     @State private var pan = CGSize.zero
     @State private var zoom: CGFloat = 1
     @State private var transientFrames: [UUID: CanvasNodeFrame] = [:]
+    @State private var linkingSourceID: UUID?
+    @State private var linkingTargetID: UUID?
+    @State private var linkingPointer: CGPoint?
+    @State private var cameraPersistenceTask: Task<Void, Never>?
 
-    init(model: AppModel, settings: AppSettings) {
+    init(
+        model: AppModel,
+        settings: AppSettings,
+        viewportSize: CGSize
+    ) {
         self.model = model
         self.settings = settings
+        self.viewportSize = viewportSize
+        _agentMonitor = ObservedObject(wrappedValue: model.agentMonitor)
         _pan = State(initialValue: CGSize(
             width: model.canvasCamera.x,
             height: model.canvasCamera.y
@@ -20,14 +32,46 @@ struct TerminalCanvasWorkspace: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
+        GeometryReader { _ in
+            let displayedFrames = displayedFrames
             ZStack(alignment: .topLeading) {
                 CanvasGrid(pan: pan, zoom: zoom)
                     .allowsHitTesting(false)
 
                 ZStack(alignment: .topLeading) {
-                    CanvasGroupsLayer(model: model, pan: pan, zoom: zoom)
-                    ContextEdgesLayer(model: model, pan: pan, zoom: zoom)
+                    ContextEdgesLayer(
+                        model: model,
+                        frames: displayedFrames,
+                        pan: pan,
+                        zoom: zoom
+                    )
+                    if let linkingSourceID,
+                       let linkingPointer,
+                       let source = displayedFrames[linkingSourceID] {
+                        CanvasLinkPreview(
+                            source: CanvasInteractionMath.viewportFrame(
+                                source,
+                                pan: pan,
+                                zoom: zoom
+                            ),
+                            target: linkingTargetID.flatMap {
+                                displayedFrames[$0].map {
+                                    CanvasInteractionMath.viewportFrame(
+                                        $0,
+                                        pan: pan,
+                                        zoom: zoom
+                                    )
+                                }
+                            },
+                            pointer: linkingPointer
+                        )
+                    }
+                    CanvasActivityEdgesLayer(
+                        activities: visibleCanvasActivities,
+                        frames: displayedFrames,
+                        pan: pan,
+                        zoom: zoom
+                    )
 
                     ForEach(model.visibleTabs) { tab in
                         CanvasNodeCard(
@@ -36,7 +80,8 @@ struct TerminalCanvasWorkspace: View {
                             settings: settings,
                             logicalFrame: logicalFrame(for: tab),
                             pan: pan,
-                            zoom: zoom
+                            zoom: zoom,
+                            isLinkTarget: linkingTargetID == tab.id
                         )
                         .zIndex(model.selectedTabID == tab.id ? 2 : 1)
                     }
@@ -51,24 +96,39 @@ struct TerminalCanvasWorkspace: View {
                         )
                         .zIndex(3)
                     }
+
+                    ForEach(visibleCanvasActivities) { activity in
+                        CanvasActivityCard(
+                            activity: activity,
+                            frame: CanvasAgentLayout.frame(
+                                for: activity,
+                                among: visibleCanvasActivities,
+                                parent: displayedFrames[activity.parentTerminalID]
+                            ),
+                            pan: pan,
+                            zoom: zoom
+                        )
+                        .zIndex(4)
+                    }
                 }
 
             }
             .overlay(alignment: .bottomTrailing) {
                 CanvasControls(
                     zoom: zoom,
-                    onZoomOut: { setZoom(zoom - 0.1) },
-                    onZoomIn: { setZoom(zoom + 0.1) },
+                    onZoomOut: { setZoom(zoom - 0.1, in: viewportSize) },
+                    onZoomIn: { setZoom(zoom + 0.1, in: viewportSize) },
                     onReset: {
                         pan = .zero
                         zoom = 1
                         persistCamera()
                     },
-                    onFit: { fit(in: proxy.size) },
+                    onFit: { fit(in: viewportSize) },
                     onResetLayout: {
                         model.resetCanvasLayout()
                         pan = .zero
                         zoom = 1
+                        persistCamera()
                     }
                 )
                 .padding(12)
@@ -98,6 +158,11 @@ struct TerminalCanvasWorkspace: View {
                     onCloseTab: closeTab,
                     onFocusAgent: focusAgent,
                     onCloseAgent: closeAgent,
+                    onSelectBackground: {
+                        model.selectedContextEdgeID = nil
+                    },
+                    onUpdateLink: updateLink,
+                    onCreateLink: createLink,
                     onMoveNode: updateNodeFrame,
                     onResizeTab: updateTabFrame,
                     onPan: updateTrackpadPan,
@@ -106,6 +171,10 @@ struct TerminalCanvasWorkspace: View {
             }
         }
         .background(RibbitTheme.canvas)
+        .onDisappear {
+            cameraPersistenceTask?.cancel()
+            persistCamera()
+        }
     }
 
     private func updateTrackpadPan(_ delta: CGSize, ended: Bool) {
@@ -114,7 +183,7 @@ struct TerminalCanvasWorkspace: View {
             height: pan.height + delta.height
         )
         if ended {
-            persistCamera()
+            scheduleCameraPersistence()
         }
     }
 
@@ -132,47 +201,87 @@ struct TerminalCanvasWorkspace: View {
         zoom = result.zoom
         pan = result.pan
         if ended {
-            persistCamera()
+            scheduleCameraPersistence()
         }
     }
 
-    private func setZoom(_ value: CGFloat) {
-        zoom = min(1.5, max(0.5, value))
+    private func setZoom(_ value: CGFloat, in available: CGSize) {
+        let target = min(
+            CanvasInteractionMetrics.maximumZoom,
+            max(CanvasInteractionMetrics.minimumZoom, value)
+        )
+        let result = CanvasInteractionMath.zoom(
+            currentZoom: zoom,
+            pan: pan,
+            magnification: target / zoom - 1,
+            anchor: CGPoint(
+                x: available.width / 2,
+                y: available.height / 2
+            )
+        )
+        zoom = result.zoom
+        pan = result.pan
         persistCamera()
     }
 
     private func fit(in available: CGSize) {
-        let frames = model.visibleTabs.compactMap(\.canvasFrame)
-            + model.externalAgentPins.map(\.canvasFrame)
-        guard let first = frames.first else {
+        let frames = Array(displayedFrames.values)
+            + visibleCanvasActivities.map {
+                CanvasAgentLayout.frame(
+                    for: $0,
+                    among: visibleCanvasActivities,
+                    parent: displayedFrames[$0.parentTerminalID]
+                )
+            }
+        guard let camera = CanvasInteractionMath.fittedCamera(
+            around: frames,
+            in: available
+        ) else {
             pan = .zero
             zoom = 1
+            persistCamera()
             return
         }
-        let minX = frames.reduce(first.x) { min($0, $1.x) }
-        let minY = frames.reduce(first.y) { min($0, $1.y) }
-        let maxX = frames.reduce(first.x + first.width) { max($0, $1.x + $1.width) }
-        let maxY = frames.reduce(first.y + first.height) { max($0, $1.y + $1.height) }
-        let contentWidth = max(1, maxX - minX)
-        let contentHeight = max(1, maxY - minY)
-        let fitted = min(
-            1,
-            max(0.5, min((available.width - 64) / contentWidth, (available.height - 64) / contentHeight))
-        )
-        zoom = fitted
-        pan = CGSize(
-            width: 32 - minX * fitted,
-            height: 32 - minY * fitted
-        )
+        zoom = camera.zoom
+        pan = CGSize(width: camera.x, height: camera.y)
         persistCamera()
     }
 
     private func persistCamera() {
+        cameraPersistenceTask?.cancel()
         model.setCanvasCamera(CanvasCamera(
             x: pan.width,
             y: pan.height,
             zoom: zoom
         ))
+    }
+
+    private func scheduleCameraPersistence() {
+        cameraPersistenceTask?.cancel()
+        let camera = CanvasCamera(
+            x: pan.width,
+            y: pan.height,
+            zoom: zoom
+        )
+        cameraPersistenceTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            model.setCanvasCamera(camera)
+        }
+    }
+
+    private var visibleCanvasActivities: [RibbitCanvasActivity] {
+        let terminalIDs = Set(model.visibleTabs.map(\.id))
+        return agentMonitor.canvasActivities.filter {
+            terminalIDs.contains($0.parentTerminalID)
+        }
+    }
+
+    private var displayedFrames: [UUID: CanvasNodeFrame] {
+        Dictionary(uniqueKeysWithValues:
+            model.visibleTabs.map { ($0.id, logicalFrame(for: $0)) }
+                + model.externalAgentPins.map { ($0.id, logicalFrame(for: $0)) }
+        )
     }
 
     private var interactionSnapshot: CanvasInteractionSnapshot {
@@ -239,6 +348,7 @@ struct TerminalCanvasWorkspace: View {
         guard let tab = model.visibleTabs.first(where: { $0.id == id }) else {
             return
         }
+        model.selectedContextEdgeID = nil
         model.selectTab(tab)
     }
 
@@ -279,6 +389,33 @@ struct TerminalCanvasWorkspace: View {
         model.unpinAgent(pin)
     }
 
+    private func updateLink(
+        sourceID: UUID,
+        pointer: CGPoint,
+        targetID: UUID?,
+        ended: Bool
+    ) {
+        if ended {
+            linkingSourceID = nil
+            linkingTargetID = nil
+            linkingPointer = nil
+        } else {
+            linkingSourceID = sourceID
+            linkingTargetID = targetID
+            linkingPointer = pointer
+        }
+    }
+
+    private func createLink(sourceID: UUID, targetID: UUID) {
+        guard let source = model.visibleTabs.first(where: {
+            $0.id == sourceID
+        }),
+        let target = model.visibleTabs.first(where: {
+            $0.id == targetID
+        }) else { return }
+        model.addContextLink(from: source, to: target)
+    }
+
     private func updateNodeFrame(
         _ id: UUID,
         frame: CanvasNodeFrame,
@@ -310,6 +447,39 @@ struct TerminalCanvasWorkspace: View {
     }
 }
 
+private enum CanvasAgentLayout {
+    static func frame(
+        for activity: RibbitCanvasActivity,
+        among activities: [RibbitCanvasActivity],
+        parent: CanvasNodeFrame?
+    ) -> CanvasNodeFrame {
+        guard let parent else {
+            return CanvasNodeFrame(x: 32, y: 32, width: 260, height: 104)
+        }
+        if activity.kind != .subagent {
+            return CanvasNodeFrame(
+                x: parent.x + 18,
+                y: parent.y + parent.height + 64,
+                width: 280,
+                height: 104
+            )
+        }
+        let siblings = activities
+            .filter {
+                $0.parentTerminalID == activity.parentTerminalID
+                    && $0.kind == .subagent
+            }
+            .sorted { $0.startedAt < $1.startedAt }
+        let index = siblings.firstIndex { $0.id == activity.id } ?? 0
+        return CanvasNodeFrame(
+            x: parent.x + parent.width + 72,
+            y: parent.y + Double(index * 124),
+            width: 280,
+            height: 104
+        )
+    }
+}
+
 enum CanvasInteractionMath {
     static func viewportFrame(
         _ frame: CanvasNodeFrame,
@@ -330,7 +500,13 @@ enum CanvasInteractionMath {
         magnification: CGFloat,
         anchor: CGPoint
     ) -> (zoom: CGFloat, pan: CGSize) {
-        let nextZoom = min(1.5, max(0.5, currentZoom * (1 + magnification)))
+        let nextZoom = min(
+            CanvasInteractionMetrics.maximumZoom,
+            max(
+                CanvasInteractionMetrics.minimumZoom,
+                currentZoom * (1 + magnification)
+            )
+        )
         guard nextZoom != currentZoom else {
             return (currentZoom, pan)
         }
@@ -344,82 +520,40 @@ enum CanvasInteractionMath {
             )
         )
     }
-}
 
-private struct CanvasGroupsLayer: View {
-    @ObservedObject var model: AppModel
-    let pan: CGSize
-    let zoom: CGFloat
-
-    var body: some View {
-        GeometryReader { _ in
-            ForEach(model.canvasGroups) { group in
-                let frames = group.nodeIDs.compactMap { model.canvasFrame(for: $0) }
-                if frames.count >= 2 {
-                    CanvasGroupBoundary(
-                        group: group,
-                        frame: CanvasInteractionMath.viewportFrame(
-                            enclosingFrame(frames),
-                            pan: pan,
-                            zoom: zoom
-                        ),
-                        onDelete: { model.removeCanvasGroup(group) }
-                    )
-                }
-            }
+    static func fittedCamera(
+        around frames: [CanvasNodeFrame],
+        in available: CGSize,
+        margin: CGFloat = 32
+    ) -> CanvasCamera? {
+        guard let first = frames.first else { return nil }
+        let minX = frames.reduce(first.x) { min($0, $1.x) }
+        let minY = frames.reduce(first.y) { min($0, $1.y) }
+        let maxX = frames.reduce(first.x + first.width) {
+            max($0, $1.x + $1.width)
         }
-    }
-
-    private func enclosingFrame(_ frames: [CanvasNodeFrame]) -> CanvasNodeFrame {
-        let minX = frames.map(\.x).min() ?? 0
-        let minY = frames.map(\.y).min() ?? 0
-        let maxX = frames.map { $0.x + $0.width }.max() ?? minX
-        let maxY = frames.map { $0.y + $0.height }.max() ?? minY
-        return CanvasNodeFrame(
-            x: minX - 18,
-            y: minY - 42,
-            width: maxX - minX + 36,
-            height: maxY - minY + 60
+        let maxY = frames.reduce(first.y + first.height) {
+            max($0, $1.y + $1.height)
+        }
+        let contentWidth = max(1, maxX - minX)
+        let contentHeight = max(1, maxY - minY)
+        let availableWidth = Double(available.width)
+        let availableHeight = Double(available.height)
+        let outerMargin = Double(margin)
+        let usableWidth = max(1, availableWidth - outerMargin * 2)
+        let usableHeight = max(1, availableHeight - outerMargin * 2)
+        let fitted = min(
+            1,
+            max(CanvasInteractionMetrics.minimumZoom, min(
+                usableWidth / contentWidth,
+                usableHeight / contentHeight
+            ))
         )
-    }
-}
-
-private struct CanvasGroupBoundary: View {
-    let group: CanvasGroup
-    let frame: CanvasNodeFrame
-    let onDelete: () -> Void
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(RibbitTheme.accent.opacity(0.025))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(
-                            RibbitTheme.accent.opacity(0.28),
-                            style: StrokeStyle(lineWidth: 1, dash: [5, 5])
-                        )
-                }
-                .allowsHitTesting(false)
-
-            Menu {
-                Button("remove group", role: .destructive, action: onDelete)
-            } label: {
-                Label(group.name, systemImage: "square.3.layers.3d")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(RibbitTheme.muted)
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(RibbitTheme.raised)
-                    .clipShape(Capsule())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .padding(8)
-        }
-        .frame(width: frame.width, height: frame.height)
-        .offset(x: frame.x, y: frame.y)
+        return CanvasCamera(
+            x: (availableWidth - contentWidth * fitted) / 2 - minX * fitted,
+            y: (availableHeight - contentHeight * fitted) / 2 - minY * fitted,
+            zoom: fitted
+        )
     }
 }
 
@@ -523,24 +657,6 @@ private struct ExternalAgentCanvasCard: View {
         .offset(x: viewportFrame.x, y: viewportFrame.y)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contextMenu {
-            Menu("group with", systemImage: "square.3.layers.3d") {
-                ForEach(model.visibleTabs) { tab in
-                    Button(tab.title) {
-                        model.groupNode(pin.id, with: tab.id)
-                    }
-                }
-                ForEach(model.externalAgentPins.filter { $0.id != pin.id }) { target in
-                    Button(target.session.title) {
-                        model.groupNode(pin.id, with: target.id)
-                    }
-                }
-            }
-            if model.canvasGroups.contains(where: { $0.nodeIDs.contains(pin.id) }) {
-                Button("remove from group", role: .destructive) {
-                    model.removeNodeFromCanvasGroup(pin.id)
-                }
-            }
-            Divider()
             Button("remove from canvas", role: .destructive) {
                 model.unpinAgent(pin)
             }
@@ -564,6 +680,7 @@ private struct CanvasNodeCard: View {
     let logicalFrame: CanvasNodeFrame
     let pan: CGSize
     let zoom: CGFloat
+    let isLinkTarget: Bool
 
     private var nodeFrame: CanvasNodeFrame {
         logicalFrame
@@ -589,10 +706,14 @@ private struct CanvasNodeCard: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(
-                    model.selectedTabID == tab.id
+                    isLinkTarget
+                        ? RibbitTheme.accent
+                        : model.selectedTabID == tab.id
                         ? (tab.kind == .terminal ? tab.terminalTint.color : RibbitTheme.accent)
                         : RibbitTheme.rule,
-                    lineWidth: model.selectedTabID == tab.id ? 1.5 : 1
+                    lineWidth: isLinkTarget
+                        ? 2
+                        : model.selectedTabID == tab.id ? 1.5 : 1
                 )
         }
         .overlay(alignment: .bottomTrailing) {
@@ -602,6 +723,16 @@ private struct CanvasNodeCard: View {
         .scaleEffect(zoom, anchor: .topLeading)
         .offset(x: viewportFrame.x, y: viewportFrame.y)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .dropDestination(for: String.self) { sourceIDs, _ in
+            guard let rawSourceID = sourceIDs.first,
+                  let sourceID = UUID(uuidString: rawSourceID),
+                  let source = model.visibleTabs.first(where: {
+                      $0.id == sourceID && $0.id != tab.id
+                  })
+            else { return false }
+            model.addContextLink(from: source, to: tab)
+            return true
+        }
     }
 
     private var header: some View {
@@ -640,6 +771,13 @@ private struct CanvasNodeCard: View {
                 )
             }
 
+            Image(systemName: "arrow.right.circle")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(RibbitTheme.muted)
+                .frame(width: 24, height: 24)
+                .contentShape(Circle())
+                .help("drag to another node to link context")
+
             Menu {
                 let targets = model.visibleTabs.filter { $0.id != tab.id }
                 if targets.isEmpty {
@@ -663,27 +801,6 @@ private struct CanvasNodeCard: View {
                         Button("remove link", role: .destructive) {
                             model.removeContextEdge(edge)
                         }
-                    }
-                }
-
-                Divider()
-
-                Menu("group with", systemImage: "square.3.layers.3d") {
-                    ForEach(model.visibleTabs.filter { $0.id != tab.id }) { target in
-                        Button(target.title) {
-                            model.groupNode(tab.id, with: target.id)
-                        }
-                    }
-                    ForEach(model.externalAgentPins) { pin in
-                        Button(pin.session.title) {
-                            model.groupNode(tab.id, with: pin.id)
-                        }
-                    }
-                }
-
-                if model.canvasGroups.contains(where: { $0.nodeIDs.contains(tab.id) }) {
-                    Button("remove from group", role: .destructive) {
-                        model.removeNodeFromCanvasGroup(tab.id)
                     }
                 }
             } label: {
@@ -774,18 +891,238 @@ private struct CanvasNodeCard: View {
     }
 }
 
+private struct CanvasLinkPreview: View {
+    let source: CanvasNodeFrame
+    let target: CanvasNodeFrame?
+    let pointer: CGPoint
+
+    var body: some View {
+        Canvas { context, _ in
+            let pointerFrame = CanvasNodeFrame(
+                x: pointer.x,
+                y: pointer.y,
+                width: 0,
+                height: 0
+            )
+            let geometry = CanvasConnectionGeometry(
+                source: source,
+                target: target ?? pointerFrame
+            )
+            var path = Path()
+            path.move(to: geometry.start)
+            path.addCurve(
+                to: geometry.end,
+                control1: geometry.control1,
+                control2: geometry.control2
+            )
+            context.stroke(
+                path,
+                with: .color(RibbitTheme.canvas.opacity(0.92)),
+                style: StrokeStyle(lineWidth: 4)
+            )
+            context.stroke(
+                path,
+                with: .color(RibbitTheme.accent.opacity(target == nil ? 0.72 : 1)),
+                style: StrokeStyle(
+                    lineWidth: target == nil ? 1.5 : 2,
+                    dash: target == nil ? [5, 4] : []
+                )
+            )
+
+            var arrow = Path()
+            arrow.move(to: geometry.arrowTip)
+            arrow.addLine(to: geometry.arrowLeft)
+            arrow.addLine(to: geometry.arrowRight)
+            arrow.closeSubpath()
+            context.fill(arrow, with: .color(RibbitTheme.accent))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct CanvasActivityEdgesLayer: View {
+    let activities: [RibbitCanvasActivity]
+    let frames: [UUID: CanvasNodeFrame]
+    let pan: CGSize
+    let zoom: CGFloat
+
+    var body: some View {
+        Canvas { context, _ in
+            for activity in activities {
+                guard let parent = frames[activity.parentTerminalID] else {
+                    continue
+                }
+                let target = CanvasAgentLayout.frame(
+                    for: activity,
+                    among: activities,
+                    parent: parent
+                )
+                let sourceFrame = CanvasInteractionMath.viewportFrame(
+                    parent,
+                    pan: pan,
+                    zoom: zoom
+                )
+                let targetFrame = CanvasInteractionMath.viewportFrame(
+                    target,
+                    pan: pan,
+                    zoom: zoom
+                )
+                let start = activity.kind == .subagent
+                    ? CGPoint(
+                        x: sourceFrame.x + sourceFrame.width,
+                        y: sourceFrame.y + sourceFrame.height / 2
+                    )
+                    : CGPoint(
+                        x: sourceFrame.x + sourceFrame.width / 2,
+                        y: sourceFrame.y + sourceFrame.height
+                    )
+                let end = activity.kind == .subagent
+                    ? CGPoint(x: targetFrame.x, y: targetFrame.y + targetFrame.height / 2)
+                    : CGPoint(x: targetFrame.x + targetFrame.width / 2, y: targetFrame.y)
+                var path = Path()
+                path.move(to: start)
+                if activity.kind == .subagent {
+                    let control = max(44, abs(end.x - start.x) * 0.5)
+                    path.addCurve(
+                        to: end,
+                        control1: CGPoint(x: start.x + control, y: start.y),
+                        control2: CGPoint(x: end.x - control, y: end.y)
+                    )
+                } else {
+                    let control = max(36, abs(end.y - start.y) * 0.5)
+                    path.addCurve(
+                        to: end,
+                        control1: CGPoint(x: start.x, y: start.y + control),
+                        control2: CGPoint(x: end.x, y: end.y - control)
+                    )
+                }
+                context.stroke(
+                    path,
+                    with: .color(activity.color.opacity(0.7)),
+                    style: StrokeStyle(
+                        lineWidth: activity.state == .working ? 1.8 : 1.2,
+                        dash: activity.state == .working ? [] : [5, 4]
+                    )
+                )
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct CanvasActivityCard: View {
+    let activity: RibbitCanvasActivity
+    let frame: CanvasNodeFrame
+    let pan: CGSize
+    let zoom: CGFloat
+
+    private var viewportFrame: CanvasNodeFrame {
+        CanvasInteractionMath.viewportFrame(frame, pan: pan, zoom: zoom)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(activity.state == .working ? activity.color : RibbitTheme.muted)
+                    .frame(width: 7, height: 7)
+                Text(activity.label)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(RibbitTheme.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(activity.state == .working ? "working" : "done")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(activity.state == .working ? activity.color : RibbitTheme.muted)
+            }
+
+            Text(activity.task.isEmpty ? activity.schedule ?? "agent activity" : activity.task)
+                .font(.system(size: 11))
+                .foregroundStyle(RibbitTheme.muted)
+                .lineLimit(2)
+
+            HStack(spacing: 6) {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(activity.elapsedLabel(at: context.date))
+                }
+                if let tokens = activity.tokens {
+                    Text("· \(tokens.formatted()) tokens")
+                }
+                if let toolUses = activity.toolUses {
+                    Text("· \(toolUses) tools")
+                }
+                if let schedule = activity.schedule, !schedule.isEmpty {
+                    Text("· \(schedule)")
+                        .lineLimit(1)
+                }
+            }
+            .font(.system(size: 9, design: .monospaced))
+            .foregroundStyle(RibbitTheme.muted)
+        }
+        .padding(12)
+        .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+        .background(RibbitTheme.raised)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(activity.color.opacity(0.55), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+        .scaleEffect(zoom, anchor: .topLeading)
+        .offset(x: viewportFrame.x, y: viewportFrame.y)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(activity.label), \(activity.state.rawValue), \(activity.task)"
+        )
+    }
+}
+
+@MainActor
+private extension RibbitCanvasActivity {
+    var color: Color {
+        switch kind {
+        case .subagent: RibbitTheme.accent
+        case .cron, .loop, .schedule: Color(nsColor: .systemPurple)
+        }
+    }
+
+    var label: String {
+        switch kind {
+        case .subagent: type ?? "subagent"
+        case .cron: "cron"
+        case .loop: "loop"
+        case .schedule: "schedule"
+        }
+    }
+
+    func elapsedLabel(at now: Date) -> String {
+        let milliseconds = durationMilliseconds
+            ?? Int((finishedAt ?? now).timeIntervalSince(startedAt) * 1_000)
+        let seconds = max(0, milliseconds / 1_000)
+        return seconds < 60
+            ? "\(seconds)s"
+            : "\(seconds / 60)m \(seconds % 60)s"
+    }
+}
+
 private struct ContextEdgesLayer: View {
     @ObservedObject var model: AppModel
+    let frames: [UUID: CanvasNodeFrame]
     let pan: CGSize
     let zoom: CGFloat
 
     var body: some View {
         GeometryReader { _ in
             ForEach(model.contextEdges) { edge in
-                if let source = model.visibleTabs.first(where: { $0.id == edge.sourceTabID }),
-                   let target = model.visibleTabs.first(where: { $0.id == edge.targetTabID }),
-                   let sourceFrame = source.canvasFrame,
-                   let targetFrame = target.canvasFrame {
+                if let sourceFrame = frames[edge.sourceTabID],
+                   let targetFrame = frames[edge.targetTabID] {
+                    let hasReverseEdge = model.contextEdges.contains {
+                        $0.sourceTabID == edge.targetTabID
+                            && $0.targetTabID == edge.sourceTabID
+                    }
                     ContextEdgeView(
                         edge: edge,
                         source: CanvasInteractionMath.viewportFrame(
@@ -799,6 +1136,11 @@ private struct ContextEdgesLayer: View {
                             zoom: zoom
                         ),
                         isSelected: model.selectedContextEdgeID == edge.id,
+                        zoom: zoom,
+                        laneOffset: hasReverseEdge
+                            ? (edge.sourceTabID.uuidString
+                                < edge.targetTabID.uuidString ? -10 : 10)
+                            : 0,
                         onSelect: { model.selectContextEdge(edge) },
                         onDelete: { model.removeContextEdge(edge) }
                     )
@@ -813,54 +1155,52 @@ private struct ContextEdgeView: View {
     let source: CanvasNodeFrame
     let target: CanvasNodeFrame
     let isSelected: Bool
+    let zoom: CGFloat
+    let laneOffset: CGFloat
     let onSelect: () -> Void
     let onDelete: () -> Void
 
-    private var direction: CGFloat {
-        let sourceCenter = source.x + source.width / 2
-        let targetCenter = target.x + target.width / 2
-        return targetCenter >= sourceCenter ? 1 : -1
-    }
-
-    private var start: CGPoint {
-        CGPoint(
-            x: direction > 0 ? source.x + source.width : source.x,
-            y: source.y + source.height / 2
+    private var geometry: CanvasConnectionGeometry {
+        CanvasConnectionGeometry(
+            source: source,
+            target: target,
+            laneOffset: laneOffset
         )
     }
 
-    private var end: CGPoint {
-        CGPoint(
-            x: direction > 0 ? target.x : target.x + target.width,
-            y: target.y + target.height / 2
-        )
-    }
-
-    private var midpoint: CGPoint {
-        CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+    private var controlSize: CGFloat {
+        min(28, max(20, 28 * zoom))
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             Canvas { context, _ in
                 var path = Path()
-                path.move(to: start)
-                let controlOffset = max(56, abs(end.x - start.x) * 0.45)
+                path.move(to: geometry.start)
                 path.addCurve(
-                    to: end,
-                    control1: CGPoint(x: start.x + direction * controlOffset, y: start.y),
-                    control2: CGPoint(x: end.x - direction * controlOffset, y: end.y)
+                    to: geometry.end,
+                    control1: geometry.control1,
+                    control2: geometry.control2
                 )
                 context.stroke(
                     path,
-                    with: .color(isSelected ? RibbitTheme.accent : RibbitTheme.muted.opacity(0.65)),
-                    style: StrokeStyle(lineWidth: isSelected ? 2 : 1.25, dash: [6, 5])
+                    with: .color(RibbitTheme.canvas.opacity(0.92)),
+                    style: StrokeStyle(lineWidth: isSelected ? 5 : 4)
+                )
+                context.stroke(
+                    path,
+                    with: .color(
+                        isSelected
+                            ? RibbitTheme.accent
+                            : RibbitTheme.muted.opacity(0.78)
+                    ),
+                    style: StrokeStyle(lineWidth: isSelected ? 2.2 : 1.45)
                 )
 
                 var arrow = Path()
-                arrow.move(to: end)
-                arrow.addLine(to: CGPoint(x: end.x - direction * 10, y: end.y - 5))
-                arrow.addLine(to: CGPoint(x: end.x - direction * 10, y: end.y + 5))
+                arrow.move(to: geometry.arrowTip)
+                arrow.addLine(to: geometry.arrowLeft)
+                arrow.addLine(to: geometry.arrowRight)
                 arrow.closeSubpath()
                 context.fill(
                     arrow,
@@ -871,20 +1211,141 @@ private struct ContextEdgeView: View {
 
             Button(action: onSelect) {
                 Image(systemName: isSelected ? "link.circle.fill" : "link.circle")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 28, height: 28)
+                    .font(.system(
+                        size: min(14, max(10, 14 * zoom)),
+                        weight: .medium
+                    ))
+                    .frame(width: controlSize, height: controlSize)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(isSelected ? RibbitTheme.accent : RibbitTheme.muted)
             .background(RibbitTheme.raised.opacity(0.92))
             .clipShape(Circle())
-            .offset(x: midpoint.x - 14, y: midpoint.y - 14)
+            .offset(
+                x: geometry.midpoint.x - controlSize / 2,
+                y: geometry.midpoint.y - controlSize / 2
+            )
             .contextMenu {
                 Button("remove context link", role: .destructive, action: onDelete)
             }
             .help("context link — click to select, right-click to remove")
         }
+    }
+}
+
+struct CanvasConnectionGeometry: Equatable {
+    let start: CGPoint
+    let end: CGPoint
+    let control1: CGPoint
+    let control2: CGPoint
+    let midpoint: CGPoint
+    let arrowTip: CGPoint
+    let arrowLeft: CGPoint
+    let arrowRight: CGPoint
+
+    init(
+        source: CanvasNodeFrame,
+        target: CanvasNodeFrame,
+        laneOffset: CGFloat = 0
+    ) {
+        let sourceCenter = CGPoint(
+            x: source.x + source.width / 2,
+            y: source.y + source.height / 2
+        )
+        let targetCenter = CGPoint(
+            x: target.x + target.width / 2,
+            y: target.y + target.height / 2
+        )
+        let deltaX = targetCenter.x - sourceCenter.x
+        let deltaY = targetCenter.y - sourceCenter.y
+
+        if abs(deltaX) >= abs(deltaY) {
+            let direction: CGFloat = deltaX >= 0 ? 1 : -1
+            start = CGPoint(
+                x: direction > 0 ? source.x + source.width : source.x,
+                y: sourceCenter.y + laneOffset
+            )
+            end = CGPoint(
+                x: direction > 0 ? target.x : target.x + target.width,
+                y: targetCenter.y + laneOffset
+            )
+            let control = max(48, abs(end.x - start.x) * 0.45)
+            control1 = CGPoint(
+                x: start.x + direction * control,
+                y: start.y
+            )
+            control2 = CGPoint(
+                x: end.x - direction * control,
+                y: end.y
+            )
+        } else {
+            let direction: CGFloat = deltaY >= 0 ? 1 : -1
+            start = CGPoint(
+                x: sourceCenter.x + laneOffset,
+                y: direction > 0 ? source.y + source.height : source.y
+            )
+            end = CGPoint(
+                x: targetCenter.x + laneOffset,
+                y: direction > 0 ? target.y : target.y + target.height
+            )
+            let control = max(48, abs(end.y - start.y) * 0.45)
+            control1 = CGPoint(
+                x: start.x,
+                y: start.y + direction * control
+            )
+            control2 = CGPoint(
+                x: end.x,
+                y: end.y - direction * control
+            )
+        }
+
+        midpoint = Self.point(
+            at: 0.5,
+            start: start,
+            control1: control1,
+            control2: control2,
+            end: end
+        )
+        arrowTip = end
+        let tangent = CGVector(
+            dx: end.x - control2.x,
+            dy: end.y - control2.y
+        )
+        let length = max(0.001, hypot(tangent.dx, tangent.dy))
+        let unit = CGVector(dx: tangent.dx / length, dy: tangent.dy / length)
+        let base = CGPoint(
+            x: end.x - unit.dx * 10,
+            y: end.y - unit.dy * 10
+        )
+        arrowLeft = CGPoint(
+            x: base.x - unit.dy * 4.5,
+            y: base.y + unit.dx * 4.5
+        )
+        arrowRight = CGPoint(
+            x: base.x + unit.dy * 4.5,
+            y: base.y - unit.dx * 4.5
+        )
+    }
+
+    private static func point(
+        at t: CGFloat,
+        start: CGPoint,
+        control1: CGPoint,
+        control2: CGPoint,
+        end: CGPoint
+    ) -> CGPoint {
+        let inverse = 1 - t
+        return CGPoint(
+            x: inverse * inverse * inverse * start.x
+                + 3 * inverse * inverse * t * control1.x
+                + 3 * inverse * t * t * control2.x
+                + t * t * t * end.x,
+            y: inverse * inverse * inverse * start.y
+                + 3 * inverse * inverse * t * control1.y
+                + 3 * inverse * t * t * control2.y
+                + t * t * t * end.y
+        )
     }
 }
 

@@ -19,6 +19,8 @@ if [[ ! -f "$event_script" ]]; then
 fi
 
 RIBBIT_EVENT_SCRIPT="$event_script" RIBBIT_INSTALL_MODE="$mode" /usr/bin/env python3 - <<'PY'
+from __future__ import annotations
+
 import copy
 import json
 import os
@@ -138,6 +140,7 @@ for provider, (path, events) in targets.items():
     command = f"{hook_script} {provider}"
     changes = []
     for event in events:
+        timeout = 305 if provider == "claude" and event == "PermissionRequest" else 2
         groups = hooks.setdefault(event, [])
         owned = [
             handler
@@ -147,11 +150,15 @@ for provider, (path, events) in targets.items():
         ]
         if owned:
             for handler in owned:
-                if handler.get("command") != command:
-                    handler.update(command=command, timeout=2, type="command")
+                if (
+                    handler.get("command") != command
+                    or handler.get("timeout") != timeout
+                    or handler.get("type") != "command"
+                ):
+                    handler.update(command=command, timeout=timeout, type="command")
                     changes.append(f"repair {event}")
             continue
-        group = {"hooks": [{"type": "command", "command": command, "timeout": 2}]}
+        group = {"hooks": [{"type": "command", "command": command, "timeout": timeout}]}
         if event == "Notification":
             group["matcher"] = "permission_prompt|idle_prompt|elicitation_dialog"
         groups.append(group)

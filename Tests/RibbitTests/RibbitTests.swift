@@ -132,12 +132,100 @@ struct RibbitTests {
         ))
     }
 
+    @Test func canvasFitCentersEveryNodeWithEvenOuterSpace() throws {
+        let camera = try #require(CanvasInteractionMath.fittedCamera(
+            around: [
+                CanvasNodeFrame(x: 100, y: 50, width: 400, height: 300),
+                CanvasNodeFrame(x: 600, y: 250, width: 200, height: 200),
+            ],
+            in: CGSize(width: 1000, height: 700)
+        ))
+
+        #expect(camera.zoom == 1)
+        #expect(camera.x == 50)
+        #expect(camera.y == 100)
+
+        let overview = try #require(CanvasInteractionMath.fittedCamera(
+            around: [
+                CanvasNodeFrame(x: 0, y: 0, width: 4_000, height: 2_000),
+            ],
+            in: CGSize(width: 1_000, height: 700)
+        ))
+        #expect(abs(
+            overview.zoom - CanvasInteractionMetrics.minimumZoom
+        ) < 0.001)
+    }
+
+    @Test func canvasConnectionsUseTheClosestAxisAndAimAtTheTarget() {
+        let horizontal = CanvasConnectionGeometry(
+            source: CanvasNodeFrame(x: 0, y: 0, width: 200, height: 100),
+            target: CanvasNodeFrame(x: 400, y: 40, width: 200, height: 100)
+        )
+        #expect(horizontal.start == CGPoint(x: 200, y: 50))
+        #expect(horizontal.end == CGPoint(x: 400, y: 90))
+        #expect(horizontal.arrowTip == horizontal.end)
+        #expect(horizontal.arrowLeft.x < horizontal.end.x)
+        #expect(horizontal.arrowRight.x < horizontal.end.x)
+
+        let vertical = CanvasConnectionGeometry(
+            source: CanvasNodeFrame(x: 0, y: 0, width: 200, height: 100),
+            target: CanvasNodeFrame(x: 20, y: 400, width: 200, height: 100)
+        )
+        #expect(vertical.start == CGPoint(x: 100, y: 100))
+        #expect(vertical.end == CGPoint(x: 120, y: 400))
+        #expect(vertical.arrowLeft.y < vertical.end.y)
+        #expect(vertical.arrowRight.y < vertical.end.y)
+
+        let parallel = CanvasConnectionGeometry(
+            source: CanvasNodeFrame(x: 0, y: 0, width: 200, height: 100),
+            target: CanvasNodeFrame(x: 400, y: 40, width: 200, height: 100),
+            laneOffset: 10
+        )
+        #expect(parallel.start.y == horizontal.start.y + 10)
+        #expect(parallel.end.y == horizontal.end.y + 10)
+    }
+
     @Test func trackpadMonitorNeverBecomesTheMouseHitTarget() {
         let monitor = CanvasInteractionMonitorView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 700)
         )
 
         #expect(monitor.hitTest(NSPoint(x: 450, y: 350)) == nil)
+    }
+
+    @Test func customCanvasCursorsStopBeforeUnderlyingViewsResetThem() {
+        let tabID = UUID()
+        let frame = CanvasNodeFrame(
+            x: 40,
+            y: 40,
+            width: 620,
+            height: 390
+        )
+        let monitor = CanvasInteractionMonitorView(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 700)
+        )
+        monitor.snapshot = CanvasInteractionSnapshot(
+            zoom: 1,
+            nodesFrontToBack: [
+                CanvasInteractionNode(
+                    id: tabID,
+                    kind: .tab,
+                    logicalFrame: frame,
+                    viewportFrame: frame,
+                    hasAgentStatus: false
+                )
+            ]
+        )
+
+        #expect(monitor.updateCursor(
+            at: CGPoint(x: 100, y: 55)
+        ))
+        #expect(monitor.updateCursor(
+            at: CGPoint(x: 800, y: 600)
+        ))
+        #expect(!monitor.updateCursor(
+            at: CGPoint(x: 300, y: 180)
+        ))
     }
 
     @Test func canvasHitTestingSeparatesNodeChromeFromTerminalContent() {
@@ -203,6 +291,10 @@ struct RibbitTests {
             at: CGPoint(x: 600, y: 55),
             snapshot: snapshot
         ) == .tabControl(tabID))
+        #expect(CanvasInteractionHitTester.target(
+            at: CGPoint(x: 585, y: 55),
+            snapshot: snapshot
+        ) == .tabLink(tabID))
         #expect(CanvasInteractionHitTester.target(
             at: CGPoint(x: 300, y: 180),
             snapshot: snapshot
@@ -331,6 +423,7 @@ struct RibbitTests {
         var resizeEnded = false
         var panDeltas: [CGSize] = []
         var panEnded = false
+        var selectedBackground = false
         var unpinnedID: UUID?
         monitor.onSelectTab = { selectedID = $0 }
         monitor.onResizeTab = { _, frame, ended in
@@ -341,6 +434,7 @@ struct RibbitTests {
             panDeltas.append(delta)
             panEnded = ended
         }
+        monitor.onSelectBackground = { selectedBackground = true }
         monitor.onCloseAgent = { unpinnedID = $0 }
 
         #expect(!monitor.beginLeftMouseForTesting(
@@ -364,6 +458,7 @@ struct RibbitTests {
         let panStart = CGPoint(x: 800, y: 600)
         let panEnd = CGPoint(x: 850, y: 625)
         #expect(!monitor.beginLeftMouseForTesting(at: panStart))
+        #expect(selectedBackground)
         #expect(monitor.dragPointerForTesting(to: panEnd))
         #expect(monitor.endPointerForTesting(at: panEnd))
         #expect(panDeltas.first == CGSize(width: 50, height: 25))
@@ -373,6 +468,67 @@ struct RibbitTests {
         #expect(monitor.beginLeftMouseForTesting(at: pinClose))
         #expect(monitor.endPointerForTesting(at: pinClose))
         #expect(unpinnedID == pinID)
+    }
+
+    @Test func canvasLinkDragPreviewsAndCreatesTheDirectedEdge() {
+        let sourceID = UUID()
+        let targetID = UUID()
+        let sourceFrame = CanvasNodeFrame(
+            x: 40,
+            y: 40,
+            width: 620,
+            height: 390
+        )
+        let targetFrame = CanvasNodeFrame(
+            x: 720,
+            y: 120,
+            width: 440,
+            height: 320
+        )
+        let monitor = CanvasInteractionMonitorView(
+            frame: NSRect(x: 0, y: 0, width: 1200, height: 700)
+        )
+        monitor.snapshot = CanvasInteractionSnapshot(
+            zoom: 1,
+            nodesFrontToBack: [
+                CanvasInteractionNode(
+                    id: targetID,
+                    kind: .tab,
+                    logicalFrame: targetFrame,
+                    viewportFrame: targetFrame,
+                    hasAgentStatus: false
+                ),
+                CanvasInteractionNode(
+                    id: sourceID,
+                    kind: .tab,
+                    logicalFrame: sourceFrame,
+                    viewportFrame: sourceFrame,
+                    hasAgentStatus: false
+                ),
+            ]
+        )
+        var previewTargetID: UUID?
+        var createdEdge: (UUID, UUID)?
+        var previewEnded = false
+        monitor.onUpdateLink = { _, _, targetID, ended in
+            previewTargetID = targetID
+            previewEnded = ended
+        }
+        monitor.onCreateLink = { createdEdge = ($0, $1) }
+
+        #expect(monitor.beginLeftMouseForTesting(
+            at: CGPoint(x: 585, y: 55)
+        ))
+        #expect(monitor.dragPointerForTesting(
+            to: CGPoint(x: 800, y: 200)
+        ))
+        #expect(previewTargetID == targetID)
+        #expect(monitor.endPointerForTesting(
+            at: CGPoint(x: 800, y: 200)
+        ))
+        #expect(createdEdge?.0 == sourceID)
+        #expect(createdEdge?.1 == targetID)
+        #expect(previewEnded)
     }
 
     @Test func everyCanvasEdgeAndCornerResizesFromItsAnchoredOppositeSide() {
@@ -1894,6 +2050,66 @@ struct RibbitTests {
         #expect(assignments[terminalID] == nil)
     }
 
+    @Test func bridgeProjectsSubagentsAndCronJobsOntoTheirTerminal() {
+        let terminalID = UUID()
+        let homeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ribbit-empty-home-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: homeURL) }
+        let monitor = RibbitAgentMonitor(homeURL: homeURL)
+        let target = RibbitSessionFocusTarget(
+            surface: .ribbit,
+            terminalSessionID: terminalID.uuidString
+        )
+        var event = RibbitAgentBridgeEvent(
+            id: "claude:42",
+            providerSessionID: "42",
+            agent: .claude,
+            title: "claude session",
+            project: "ribbit",
+            activity: "using Agent",
+            state: .running,
+            focusTarget: target,
+            canvasAction: .start,
+            canvasActivityID: "tool-1",
+            canvasActivityKind: .subagent,
+            canvasActivityType: "general-purpose",
+            canvasTask: "scan processes"
+        )
+
+        let started = Date(timeIntervalSince1970: 100)
+        monitor.apply(event, now: started)
+        #expect(monitor.canvasActivities.count == 1)
+        #expect(monitor.canvasActivities[0].parentTerminalID == terminalID)
+        #expect(monitor.canvasActivities[0].state == .working)
+        #expect(monitor.canvasActivities[0].task == "scan processes")
+
+        event.canvasAction = .finish
+        event.canvasDurationMilliseconds = 1_500
+        event.canvasTokens = 800
+        monitor.apply(event, now: started.addingTimeInterval(2))
+        #expect(monitor.canvasActivities[0].state == .done)
+        #expect(monitor.canvasActivities[0].durationMilliseconds == 1_500)
+        #expect(monitor.canvasActivities[0].tokens == 800)
+
+        event.canvasAction = .start
+        event.canvasActivityID = "cron:42"
+        event.canvasActivityKind = .cron
+        event.canvasActivityType = nil
+        event.canvasTask = "scan every morning"
+        event.canvasSchedule = "0 9 * * *"
+        monitor.apply(event)
+        #expect(monitor.canvasActivities.count == 2)
+        let restored = RibbitAgentMonitor(homeURL: homeURL)
+        #expect(restored.canvasActivities.count == 1)
+        #expect(restored.canvasActivities[0].kind == .cron)
+        #expect(restored.canvasActivities[0].schedule == "0 9 * * *")
+
+        event.canvasAction = .remove
+        event.canvasActivityID = nil
+        monitor.apply(event)
+        #expect(monitor.canvasActivities.map(\.kind) == [.subagent])
+    }
+
     @Test @MainActor
     func monitorKeepsDistinctTasksInOneWorkspaceAndMergesExactDuplicates() throws {
         let root = FileManager.default.temporaryDirectory
@@ -2336,7 +2552,7 @@ struct RibbitTests {
             WorkspaceDocument.self,
             from: JSONEncoder().encode(document)
         )
-        #expect(restored.version == 5)
+        #expect(restored.version == WorkspaceDocument.currentVersion)
         #expect(restored.tabs.first?.lastKnownAgent == .codex)
         #expect(restored.tabs.first?.providerSessionID == "thread-123")
     }
@@ -2386,14 +2602,15 @@ struct RibbitTests {
         #expect(restored.externalAgentPins.first?.canvasFrame == moved)
     }
 
-    @Test func olderWorkspaceMigratesWithNoExternalAgentPins() throws {
+    @Test func olderWorkspaceMigratesAndIgnoresRemovedCanvasGroups() throws {
         let json = """
         {
           "version": 3,
           "mode": "tabs",
           "camera": {"x": 0, "y": 0, "zoom": 1},
           "tabs": [],
-          "contextEdges": []
+          "contextEdges": [],
+          "canvasGroups": "removed"
         }
         """
         let document = try JSONDecoder().decode(
@@ -2402,36 +2619,6 @@ struct RibbitTests {
         )
         #expect(document.version == 3)
         #expect(document.externalAgentPins.isEmpty)
-        #expect(document.canvasGroups.isEmpty)
-    }
-
-    @Test func canvasGroupsPersistAndDissolveBelowTwoNodes() throws {
-        let fixture = try temporaryFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let workspaces = fixture.root.appendingPathComponent("workspaces", isDirectory: true)
-        let model = AppModel(
-            projectURL: fixture.project,
-            registryURL: fixture.registry,
-            workspaceDirectoryURL: workspaces,
-            terminalBackendPreference: .directShell
-        )
-        let first = try #require(model.selectedTab)
-        model.newNote()
-        let second = try #require(model.selectedTab)
-        model.groupNode(first.id, with: second.id)
-        let group = try #require(model.canvasGroups.first)
-        #expect(Set(group.nodeIDs) == Set([first.id, second.id]))
-
-        let restored = AppModel(
-            projectURL: fixture.project,
-            registryURL: fixture.registry,
-            workspaceDirectoryURL: workspaces,
-            terminalBackendPreference: .directShell
-        )
-        #expect(restored.canvasGroups == [group])
-
-        restored.removeNodeFromCanvasGroup(first.id)
-        #expect(restored.canvasGroups.isEmpty)
     }
 
     @Test func nootAgentStateMigratesOnceWithoutDeletingLegacyData() throws {
@@ -2506,6 +2693,79 @@ struct RibbitTests {
         #expect(ordinary.life == .running)
         #expect(ordinary.displayedSessions.map(\.id) == ["run-new", "run-old"])
         #expect(!ordinary.visibleSessions.contains { $0.id == "idle" })
+    }
+
+    @Test @MainActor
+    func monitorKeepsActionableApprovalsAndOnlyTheLatestConversationItems() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ribbit-approval-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let monitor = RibbitAgentMonitor(homeURL: root)
+
+        for index in 0..<14 {
+            monitor.apply(RibbitAgentBridgeEvent(
+                id: "claude:session-1",
+                providerSessionID: "session-1",
+                agent: .claude,
+                title: "claude session",
+                project: "ribbit",
+                activity: "working",
+                state: .running,
+                attentionKind: nil,
+                attentionDetail: nil,
+                approvalID: nil,
+                approvalToolName: nil,
+                approvalSummary: nil,
+                conversationID: "item-\(index)",
+                conversationRole: index.isMultiple(of: 2) ? .user : .tool,
+                conversationText: "activity \(index)",
+                focusTarget: nil,
+                canvasAction: nil,
+                canvasActivityID: nil,
+                canvasActivityKind: nil,
+                canvasActivityType: nil,
+                canvasTask: nil,
+                canvasSchedule: nil,
+                canvasDurationMilliseconds: nil,
+                canvasTokens: nil,
+                canvasToolUses: nil
+            ))
+        }
+        monitor.apply(RibbitAgentBridgeEvent(
+            id: "claude:session-1",
+            providerSessionID: "session-1",
+            agent: .claude,
+            title: "claude session",
+            project: "ribbit",
+            activity: "permission requested",
+            state: .attention,
+            attentionKind: .permission,
+            attentionDetail: "git status --short",
+            approvalID: "approval-1",
+            approvalToolName: "Bash",
+            approvalSummary: "git status --short",
+            conversationID: "approval-item",
+            conversationRole: .status,
+            conversationText: "Approval requested · Bash: git status --short",
+            focusTarget: nil,
+            canvasAction: nil,
+            canvasActivityID: nil,
+            canvasActivityKind: nil,
+            canvasActivityType: nil,
+            canvasTask: nil,
+            canvasSchedule: nil,
+            canvasDurationMilliseconds: nil,
+            canvasTokens: nil,
+            canvasToolUses: nil
+        ))
+
+        #expect(monitor.approvalRequests.first?.toolName == "Bash")
+        #expect(monitor.approvalRequests.first?.summary == "git status --short")
+        #expect(monitor.conversationItemsBySessionID["claude:session-1"]?.count == 12)
+        #expect(
+            monitor.conversationItemsBySessionID["claude:session-1"]?.last?.id
+                == "approval-item"
+        )
     }
 
     @Test func notchDismissalReturnsOnlyForANewLivePhaseOrNewAttention() {
@@ -2617,8 +2877,7 @@ struct RibbitTests {
 
         let expanded = RibbitAgentNotchGeometry.expandedSize(
             for: metrics,
-            displayedSessionCount: 3,
-            showsAttentionDetail: false
+            displayedSessionCount: 3
         )
         let expandedFrame = RibbitAgentNotchGeometry.topAnchoredFrame(
             size: expanded,
@@ -2654,13 +2913,34 @@ struct RibbitTests {
             RibbitAgentNotchGeometry.expandedSize(
                 for: metrics,
                 displayedSessionCount: 2,
-                showsAttentionDetail: false,
                 contentWidth: $0.contentWidth
             ).width
         }
 
         #expect(compact == CGSize(width: 280, height: 38))
         #expect(widths == [518, 650, 782, 914])
+    }
+
+    @Test func conversationTrackerAddsOnlyACompactStripToTheNotch() {
+        let metrics = RibbitNotchScreenMetrics(
+            frame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+            visibleFrame: CGRect(x: 0, y: 40, width: 1512, height: 904),
+            safeAreaTop: 38,
+            auxiliaryTopLeftArea: CGRect(x: 0, y: 944, width: 650, height: 38),
+            auxiliaryTopRightArea: CGRect(x: 862, y: 944, width: 650, height: 38),
+            backingScaleFactor: 2
+        )
+        let base = RibbitAgentNotchGeometry.expandedSize(
+            for: metrics,
+            displayedSessionCount: 3
+        )
+        let tracked = RibbitAgentNotchGeometry.expandedSize(
+            for: metrics,
+            displayedSessionCount: 3,
+            detailHeight: RibbitAgentNotchGeometry.conversationDetailHeight
+        )
+
+        #expect(tracked.height - base.height == 54)
     }
 
     @Test func notchGlassKeepsCompactBlackAndSeparatesDepthFromOpacity() {

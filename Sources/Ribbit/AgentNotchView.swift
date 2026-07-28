@@ -1,3 +1,6 @@
+// Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
+// Hallmark · component: notch approval + recent activity · genre: technical · theme: ribbit
+// States: default · hover · focus · active · disabled · loading · error · success
 import AppKit
 import SwiftUI
 
@@ -204,8 +207,20 @@ private struct RibbitExpandedNotchView: View {
                 }
             }
 
-            if let attention = state.projection.primaryAttention {
-                RibbitNotchAttentionDetail(state: state, session: attention)
+            if let detailSession = state.detailSession {
+                if let approval = state.approval(for: detailSession) {
+                    RibbitNotchApprovalDetail(
+                        state: state,
+                        session: detailSession,
+                        request: approval
+                    )
+                } else if detailSession.needsAttention {
+                    RibbitNotchAttentionDetail(state: state, session: detailSession)
+                } else {
+                    RibbitNotchConversationTracker(
+                        items: state.recentConversation(for: detailSession, limit: 2)
+                    )
+                }
             }
             Spacer(minLength: 8)
         }
@@ -478,6 +493,201 @@ private struct RibbitNotchSessionRow: View {
         if seconds < 60 { return "now" }
         if seconds < 3_600 { return "\(seconds / 60)m ago" }
         return "\(seconds / 3_600)h ago"
+    }
+}
+
+private struct RibbitNotchApprovalDetail: View {
+    @ObservedObject var state: RibbitAgentNotchState
+    let session: RibbitAgentSession
+    let request: RibbitApprovalRequest
+    @State private var chosenDecision: RibbitApprovalDecision?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 7) {
+                Image(systemName: "lock.open.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(RibbitNotchColors.attention)
+                Text("CLAUDE REQUEST")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RibbitNotchColors.attention)
+                Text(request.toolName)
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(RibbitNotchColors.primaryText)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        Color.white.opacity(0.09),
+                        in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    )
+                Spacer()
+            }
+
+            Text(request.summary)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(RibbitNotchColors.primaryText)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+                .textSelection(.enabled)
+
+            if let failureMessage = request.failureMessage {
+                Label(failureMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(RibbitNotchColors.attention)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 7) {
+                RibbitNotchDecisionButton(
+                    label: chosenDecision == .deny && request.status == .responding
+                        ? "denying…"
+                        : "deny",
+                    symbol: "xmark",
+                    primary: false,
+                    isLoading: request.status == .responding,
+                    isError: request.status == .failed
+                ) {
+                    chosenDecision = .deny
+                    state.resolveApproval(request, decision: .deny)
+                }
+                RibbitNotchDecisionButton(
+                    label: chosenDecision == .allow && request.status == .responding
+                        ? "allowing…"
+                        : "allow once",
+                    symbol: "checkmark",
+                    primary: true,
+                    isLoading: request.status == .responding,
+                    isError: request.status == .failed
+                ) {
+                    chosenDecision = .allow
+                    state.resolveApproval(request, decision: .allow)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 9)
+        .frame(
+            height: RibbitAgentNotchGeometry.attentionDetailHeight,
+            alignment: .top
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "Claude requests permission to use \(request.toolName) in \(session.project)"
+        )
+    }
+}
+
+private struct RibbitNotchDecisionButton: View {
+    let label: String
+    let symbol: String
+    let primary: Bool
+    let isLoading: Bool
+    let isError: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+    @FocusState private var isFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 7.5, weight: .bold))
+                }
+                Text(label)
+                    .lineLimit(1)
+            }
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(primary ? Color.black : RibbitNotchColors.primaryText)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(
+                primary
+                    ? Color.white.opacity(isHovering ? 1 : 0.92)
+                    : Color.white.opacity(isHovering ? 0.11 : 0.055),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(
+                        isError
+                            ? RibbitNotchColors.attention
+                            : isFocused ? RibbitNotchColors.ready : Color.clear,
+                        lineWidth: isFocused ? 2 : 1
+                    )
+            }
+        }
+        .buttonStyle(RibbitNotchDecisionPressStyle(reduceMotion: reduceMotion))
+        .disabled(isLoading)
+        .opacity(isLoading ? 0.62 : 1)
+        .focused($isFocused)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(label)
+    }
+}
+
+private struct RibbitNotchDecisionPressStyle: ButtonStyle {
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .offset(y: configuration.isPressed && !reduceMotion ? 1 : 0)
+    }
+}
+
+private struct RibbitNotchConversationTracker: View {
+    let items: [RibbitConversationItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("RECENT")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(RibbitNotchColors.tertiaryText)
+
+            ForEach(items) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(roleLabel(item.role))
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(roleColor(item.role))
+                        .frame(width: 48, alignment: .leading)
+                    Text(item.text)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(RibbitNotchColors.secondaryText)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .frame(
+            height: RibbitAgentNotchGeometry.conversationDetailHeight,
+            alignment: .topLeading
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("recent conversation")
+    }
+
+    private func roleLabel(_ role: RibbitConversationRole) -> String {
+        switch role {
+        case .user: "YOU"
+        case .assistant: "AGENT"
+        case .tool: "TOOL"
+        case .status: "STATUS"
+        }
+    }
+
+    private func roleColor(_ role: RibbitConversationRole) -> Color {
+        switch role {
+        case .user: RibbitNotchColors.ready
+        case .assistant: RibbitNotchColors.running
+        case .tool, .status: RibbitNotchColors.tertiaryText
+        }
     }
 }
 

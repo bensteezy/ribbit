@@ -110,7 +110,7 @@ struct CanvasCamera: Codable, Equatable {
 }
 
 struct WorkspaceDocument: Codable, Equatable {
-    static let currentVersion = 5
+    static let currentVersion = 6
 
     var version: Int = currentVersion
     var selectedTabID: UUID?
@@ -119,7 +119,6 @@ struct WorkspaceDocument: Codable, Equatable {
     var tabs: [WorkspaceTabRecord]
     var contextEdges: [ContextEdge]
     var externalAgentPins: [ExternalAgentPin]
-    var canvasGroups: [CanvasGroup]
 
     init(
         version: Int = currentVersion,
@@ -128,8 +127,7 @@ struct WorkspaceDocument: Codable, Equatable {
         camera: CanvasCamera,
         tabs: [WorkspaceTabRecord],
         contextEdges: [ContextEdge] = [],
-        externalAgentPins: [ExternalAgentPin] = [],
-        canvasGroups: [CanvasGroup] = []
+        externalAgentPins: [ExternalAgentPin] = []
     ) {
         self.version = version
         self.selectedTabID = selectedTabID
@@ -138,7 +136,6 @@ struct WorkspaceDocument: Codable, Equatable {
         self.tabs = tabs
         self.contextEdges = contextEdges
         self.externalAgentPins = externalAgentPins
-        self.canvasGroups = canvasGroups
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -149,7 +146,6 @@ struct WorkspaceDocument: Codable, Equatable {
         case tabs
         case contextEdges
         case externalAgentPins
-        case canvasGroups
     }
 
     init(from decoder: Decoder) throws {
@@ -167,10 +163,6 @@ struct WorkspaceDocument: Codable, Equatable {
             [ExternalAgentPin].self,
             forKey: .externalAgentPins
         ) ?? []
-        canvasGroups = try container.decodeIfPresent(
-            [CanvasGroup].self,
-            forKey: .canvasGroups
-        ) ?? []
     }
 }
 
@@ -187,26 +179,6 @@ struct ExternalAgentPin: Codable, Equatable, Identifiable {
         self.id = id
         self.session = session
         self.canvasFrame = canvasFrame
-    }
-}
-
-struct CanvasGroup: Codable, Equatable, Identifiable {
-    let id: UUID
-    var name: String
-    var nodeIDs: [UUID]
-    let createdAt: Date
-
-    init(
-        id: UUID = UUID(),
-        name: String,
-        nodeIDs: [UUID],
-        createdAt: Date = .now
-    ) {
-        var seen = Set<UUID>()
-        self.id = id
-        self.name = name
-        self.nodeIDs = nodeIDs.filter { seen.insert($0).inserted }
-        self.createdAt = createdAt
     }
 }
 

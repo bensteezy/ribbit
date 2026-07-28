@@ -7,6 +7,8 @@ final class RibbitAgentBridgeServer: @unchecked Sendable {
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "app.ribbit.agent-bridge")
     private let receiveEvent: @Sendable (RibbitAgentBridgeEvent) -> Void
+    private var pendingApprovals: [String: NWConnection] = [:]
+    private var approvalExpiryTasks: [String: DispatchWorkItem] = [:]
 
     init(receiveEvent: @escaping @Sendable (RibbitAgentBridgeEvent) -> Void) {
         self.receiveEvent = receiveEvent
@@ -35,8 +37,39 @@ final class RibbitAgentBridgeServer: @unchecked Sendable {
     }
 
     func stop() {
+        queue.sync {
+            pendingApprovals.values.forEach { $0.cancel() }
+            pendingApprovals.removeAll()
+            approvalExpiryTasks.values.forEach { $0.cancel() }
+            approvalExpiryTasks.removeAll()
+        }
         listener?.cancel()
         listener = nil
+    }
+
+    func respondToApproval(
+        id: String,
+        decision: RibbitApprovalDecision,
+        completion: @escaping @Sendable (Bool) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self,
+                  let connection = pendingApprovals.removeValue(forKey: id)
+            else {
+                completion(false)
+                return
+            }
+            approvalExpiryTasks.removeValue(forKey: id)?.cancel()
+            respond(
+                to: connection,
+                status: "200 OK",
+                body: [
+                    "decision": decision.rawValue,
+                    "reason": decision == .deny ? "Denied from Ribbit" : "",
+                ],
+                completion: completion
+            )
+        }
     }
 
     private func receive(on connection: NWConnection) {
@@ -119,15 +152,37 @@ final class RibbitAgentBridgeServer: @unchecked Sendable {
             respond(to: connection, status: "422 Unprocessable Content")
             return
         }
+        if let approvalID = event.approvalID,
+           event.agent == .claude,
+           event.attentionKind == .permission {
+            pendingApprovals.removeValue(forKey: approvalID)?.cancel()
+            approvalExpiryTasks.removeValue(forKey: approvalID)?.cancel()
+            pendingApprovals[approvalID] = connection
+            let expiry = DispatchWorkItem { [weak self, weak connection] in
+                guard let self,
+                      pendingApprovals.removeValue(forKey: approvalID) != nil
+                else { return }
+                approvalExpiryTasks.removeValue(forKey: approvalID)
+                connection?.cancel()
+            }
+            approvalExpiryTasks[approvalID] = expiry
+            queue.asyncAfter(deadline: .now() + 300, execute: expiry)
+            receiveEvent(event)
+            return
+        }
         receiveEvent(event)
         respond(to: connection, status: "202 Accepted")
     }
 
     private func respond(
         to connection: NWConnection,
-        status: String
+        status: String,
+        body object: [String: String]? = nil,
+        completion: @escaping @Sendable (Bool) -> Void = { _ in }
     ) {
-        let body = Data("{\"ok\":true}".utf8)
+        let body = object.flatMap {
+            try? JSONSerialization.data(withJSONObject: $0)
+        } ?? Data("{\"ok\":true}".utf8)
         let header = "HTTP/1.1 \(status)\r\n"
             + "Content-Type: application/json\r\n"
             + "Content-Length: \(body.count)\r\n"
@@ -136,7 +191,10 @@ final class RibbitAgentBridgeServer: @unchecked Sendable {
             content: Data(header.utf8) + body,
             contentContext: .finalMessage,
             isComplete: true,
-            completion: .contentProcessed { _ in connection.cancel() }
+            completion: .contentProcessed { error in
+                completion(error == nil)
+                connection.cancel()
+            }
         )
     }
 }

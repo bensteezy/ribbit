@@ -55,9 +55,6 @@ struct SettingsView: View {
     private var header: some View {
         ZStack(alignment: .trailing) {
             VStack(spacing: 7) {
-                Text("Make it yours")
-                    .font(.system(size: 27, weight: .bold))
-                    .foregroundStyle(RibbitTheme.ink)
                 Text("Tune the open notch and side panel. Every change previews instantly.")
                     .font(.system(size: 12.5))
                     .foregroundStyle(RibbitTheme.muted)

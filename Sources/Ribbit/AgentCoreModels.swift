@@ -54,6 +54,44 @@ enum RibbitAttentionKind: String, Codable, CaseIterable, Sendable {
     case followUp
 }
 
+enum RibbitConversationRole: String, Codable, Sendable {
+    case user
+    case assistant
+    case tool
+    case status
+}
+
+struct RibbitConversationItem: Identifiable, Equatable, Codable, Sendable {
+    let id: String
+    let sessionID: String
+    let role: RibbitConversationRole
+    let text: String
+    let createdAt: Date
+}
+
+enum RibbitApprovalStatus: String, Codable, Sendable {
+    case pending
+    case responding
+    case failed
+}
+
+enum RibbitApprovalDecision: String, Codable, Sendable {
+    case allow
+    case deny
+}
+
+struct RibbitApprovalRequest: Identifiable, Equatable, Codable, Sendable {
+    let id: String
+    let sessionID: String
+    let agent: RibbitAgentKind
+    let project: String
+    let toolName: String
+    let summary: String
+    let receivedAt: Date
+    var status: RibbitApprovalStatus
+    var failureMessage: String?
+}
+
 struct RibbitSessionFocusTarget: Codable, Hashable, Sendable {
     enum Surface: String, Codable, Sendable {
         case ribbit
@@ -157,7 +195,57 @@ struct RibbitAgentBridgeEvent: Codable, Sendable {
     var state: RibbitAgentState
     var attentionKind: RibbitAttentionKind?
     var attentionDetail: String?
+    var approvalID: String?
+    var approvalToolName: String?
+    var approvalSummary: String?
+    var conversationID: String?
+    var conversationRole: RibbitConversationRole?
+    var conversationText: String?
     var focusTarget: RibbitSessionFocusTarget?
+    var canvasAction: RibbitCanvasActivityAction?
+    var canvasActivityID: String?
+    var canvasActivityKind: RibbitCanvasActivityKind?
+    var canvasActivityType: String?
+    var canvasTask: String?
+    var canvasSchedule: String?
+    var canvasDurationMilliseconds: Int?
+    var canvasTokens: Int?
+    var canvasToolUses: Int?
+}
+
+enum RibbitCanvasActivityAction: String, Codable, Sendable {
+    case start
+    case finish
+    case finishOne
+    case remove
+}
+
+enum RibbitCanvasActivityKind: String, Codable, Sendable {
+    case subagent
+    case cron
+    case loop
+    case schedule
+}
+
+enum RibbitCanvasActivityState: String, Codable, Sendable {
+    case working
+    case done
+}
+
+struct RibbitCanvasActivity: Identifiable, Equatable, Codable, Sendable {
+    let id: UUID
+    let eventID: String
+    let parentTerminalID: UUID
+    var kind: RibbitCanvasActivityKind
+    var type: String?
+    var task: String
+    var schedule: String?
+    var state: RibbitCanvasActivityState
+    let startedAt: Date
+    var finishedAt: Date?
+    var durationMilliseconds: Int?
+    var tokens: Int?
+    var toolUses: Int?
 }
 
 struct RibbitTerminalIdentity: Equatable, Sendable {

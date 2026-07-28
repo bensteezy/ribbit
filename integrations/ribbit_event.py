@@ -5,12 +5,87 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import urllib.request
+import uuid
 
 BRIDGE_URL = "http://127.0.0.1:9848/v1/events"
+SHELL_TOOL_NAMES = {"bash", "exec_command", "shell", "shellcommand"}
+APPROVAL_TIMEOUT_SECONDS = 300
+
+
+def _clean_text(value: object, limit: int = 600) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _tool_summary(tool_name: str, tool_input: dict) -> str:
+    for key in ("command", "cmd"):
+        if tool_input.get(key):
+            return _clean_text(tool_input[key])
+    for key in ("file_path", "path", "notebook_path", "url"):
+        if tool_input.get(key):
+            return _clean_text(tool_input[key])
+    for key in ("query", "pattern", "prompt", "description"):
+        if tool_input.get(key):
+            return _clean_text(tool_input[key])
+    if tool_input:
+        return _clean_text(json.dumps(tool_input, sort_keys=True))
+    return f"Run {tool_name}"
+
+
+def _latest_assistant_text(transcript_path: object) -> str | None:
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as transcript:
+            transcript.seek(0, os.SEEK_END)
+            size = transcript.tell()
+            transcript.seek(max(0, size - 262_144))
+            content = transcript.read().decode("utf-8", errors="ignore")
+        for line in reversed(content.splitlines()):
+            record = json.loads(line)
+            if record.get("type") != "assistant":
+                continue
+            message = record.get("message") or {}
+            blocks = message.get("content")
+            if isinstance(blocks, str):
+                return _clean_text(blocks)
+            if isinstance(blocks, list):
+                text = " ".join(
+                    str(block.get("text", ""))
+                    for block in blocks
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                if text.strip():
+                    return _clean_text(text)
+    except Exception:
+        pass
+    return None
+
+
+def _installed_cron(command: str) -> tuple[str, str] | None:
+    """Return the schedule and command from a shell command that installs crontab."""
+    if not re.search(r"(?:^|[/\s])crontab(?:\s|$)", command):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    cron_field = re.compile(r"^[0-9A-Za-z*/?,#LW-]+$")
+    for token in reversed(tokens):
+        for line in reversed(token.splitlines()):
+            fields = line.strip().split(maxsplit=5)
+            if (
+                len(fields) == 6
+                and all(cron_field.fullmatch(field) for field in fields[:5])
+            ):
+                return " ".join(fields[:5]), fields[5]
+    return None
 
 
 def _terminal_tty() -> str | None:
@@ -184,7 +259,10 @@ def normalized_event(raw: dict, provider: str) -> dict:
         or project
     )
     tool_name = raw.get("tool_name") or raw.get("tool") or "tool"
+    tool_input = raw.get("tool_input") or {}
+    tool_response = raw.get("tool_response") or {}
     detail = raw.get("message") or raw.get("title") or ""
+    summary = _tool_summary(str(tool_name), tool_input)
 
     payload = {
         "id": f"{provider}:{session_id}",
@@ -204,6 +282,17 @@ def normalized_event(raw: dict, provider: str) -> dict:
             attentionKind="permission",
             attentionDetail=detail or f"{tool_name} requires approval.",
         )
+        if event_key == "permissionrequest" and provider == "claude":
+            approval_id = str(uuid.uuid4())
+            payload.update(
+                approvalID=approval_id,
+                approvalToolName=str(tool_name),
+                approvalSummary=summary,
+                attentionDetail=summary,
+                conversationID=f"approval:{approval_id}",
+                conversationRole="status",
+                conversationText=f"Approval requested · {tool_name}: {summary}",
+            )
     elif notification in {"idle_prompt", "elicitation_dialog"}:
         payload.update(
             activity="waiting for your input",
@@ -215,6 +304,13 @@ def normalized_event(raw: dict, provider: str) -> dict:
         payload.update(activity="ready for a prompt", state="paused")
     elif event_key in {"userpromptsubmit", "beforesubmitprompt", "subagentstart"}:
         payload.update(activity="working from your prompt", state="running")
+        prompt = raw.get("prompt") or raw.get("user_prompt")
+        if event_key != "subagentstart" and prompt:
+            payload.update(
+                conversationID=str(uuid.uuid4()),
+                conversationRole="user",
+                conversationText=_clean_text(prompt),
+            )
     elif event_key in {"precompact", "postcompact"}:
         payload.update(activity="compacting context", state="running")
     elif event_key in {
@@ -223,6 +319,11 @@ def normalized_event(raw: dict, provider: str) -> dict:
         "beforemcpexecution",
     }:
         payload.update(activity=f"using {tool_name}", state="running")
+        payload.update(
+            conversationID=str(uuid.uuid4()),
+            conversationRole="tool",
+            conversationText=f"{tool_name} · {summary}",
+        )
     elif event_key in {
         "posttooluse",
         "posttoolusefailure",
@@ -235,6 +336,21 @@ def normalized_event(raw: dict, provider: str) -> dict:
         payload.update(activity="continuing after tool use", state="running")
     elif event_key in {"stop", "subagentstop"}:
         payload.update(activity="ready for another prompt", state="paused")
+        assistant_text = (
+            raw.get("last_assistant_message")
+            or raw.get("response")
+            or (
+                _latest_assistant_text(raw.get("transcript_path"))
+                if provider == "claude" and event_key == "stop"
+                else None
+            )
+        )
+        if assistant_text:
+            payload.update(
+                conversationID=str(uuid.uuid4()),
+                conversationRole="assistant",
+                conversationText=_clean_text(assistant_text),
+            )
     elif event_key == "stopfailure":
         payload.update(
             activity=detail or "stopped with an error",
@@ -247,6 +363,86 @@ def normalized_event(raw: dict, provider: str) -> dict:
         )
     elif event_key == "sessionend":
         payload.update(activity="session ended", state="completed")
+
+    if event_key == "userpromptsubmit":
+        payload.update(
+            canvasAction="remove",
+            canvasActivityKind="subagent",
+        )
+    elif event_key == "pretooluse" and tool_name in {"Agent", "Task"}:
+        payload.update(
+            canvasAction="start",
+            canvasActivityID=raw.get("tool_use_id") or f"subagent:{session_id}",
+            canvasActivityKind="subagent",
+            canvasActivityType=tool_input.get("subagent_type"),
+            canvasTask=tool_input.get("description") or tool_input.get("prompt") or "",
+        )
+    elif event_key == "posttooluse" and tool_name in {"Agent", "Task"}:
+        is_async = (
+            tool_response.get("status") == "async_launched"
+            or tool_response.get("isAsync") is True
+        )
+        if not is_async:
+            payload.update(
+                canvasAction="finish",
+                canvasActivityID=raw.get("tool_use_id") or f"subagent:{session_id}",
+                canvasActivityKind="subagent",
+                canvasDurationMilliseconds=tool_response.get("totalDurationMs"),
+                canvasTokens=tool_response.get("totalTokens"),
+                canvasToolUses=tool_response.get("totalToolUseCount"),
+            )
+    elif event_key == "subagentstop":
+        payload.update(
+            canvasAction="finishOne",
+            canvasActivityKind="subagent",
+        )
+    elif event_key == "pretooluse" and tool_name == "CronDelete":
+        payload.update(
+            canvasAction="remove",
+            canvasActivityKind="cron",
+        )
+    elif event_key == "pretooluse" and tool_name == "CronCreate":
+        payload.update(
+            canvasAction="start",
+            canvasActivityID=f"cron:{session_id}",
+            canvasActivityKind="cron",
+            canvasTask=tool_input.get("prompt") or "",
+            canvasSchedule=tool_input.get("cron"),
+        )
+    elif (
+        event_key in {"pretooluse", "beforeshellexecution"}
+        and str(tool_name).lower() in SHELL_TOOL_NAMES
+    ):
+        command = str(
+            tool_input.get("cmd")
+            or tool_input.get("command")
+            or raw.get("command")
+            or ""
+        )
+        cron = _installed_cron(command)
+        if cron:
+            schedule, task = cron
+            payload.update(
+                canvasAction="start",
+                canvasActivityID=f"cron:{session_id}:{schedule}:{task}",
+                canvasActivityKind="cron",
+                canvasTask=task,
+                canvasSchedule=schedule,
+            )
+    elif event_key == "pretooluse" and tool_name in {"Skill", "ScheduleWakeup"}:
+        skill = str(tool_input.get("skill") or "").split(":")[-1]
+        recurring_kind = (
+            "loop" if tool_name == "ScheduleWakeup"
+            else skill if skill in {"loop", "schedule", "cron"} else None
+        )
+        if recurring_kind:
+            payload.update(
+                canvasAction="start",
+                canvasActivityID=f"{recurring_kind}:{session_id}",
+                canvasActivityKind=recurring_kind,
+                canvasTask=tool_input.get("prompt") or "",
+                canvasSchedule=tool_input.get("cron"),
+            )
     return payload
 
 
@@ -256,14 +452,30 @@ def main() -> int:
         return 0
     try:
         raw = json.load(sys.stdin)
+        event = normalized_event(raw, provider)
         request = urllib.request.Request(
             BRIDGE_URL,
-            data=json.dumps(normalized_event(raw, provider)).encode("utf-8"),
+            data=json.dumps(event).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=0.75):
-            pass
+        timeout = APPROVAL_TIMEOUT_SECONDS if event.get("approvalID") else 0.75
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if event.get("approvalID"):
+                result = json.load(response)
+                decision = result.get("decision")
+                if decision in {"allow", "deny"}:
+                    output = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PermissionRequest",
+                            "decision": {"behavior": decision},
+                        }
+                    }
+                    if decision == "deny":
+                        output["hookSpecificOutput"]["decision"]["message"] = (
+                            result.get("reason") or "Denied from Ribbit"
+                        )
+                    print(json.dumps(output))
     except Exception:
         # Observability must never interrupt the provider.
         pass

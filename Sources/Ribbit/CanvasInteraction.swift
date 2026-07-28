@@ -65,6 +65,7 @@ enum CanvasHitTarget: Equatable {
     case tabHeader(UUID)
     case tabControl(UUID)
     case tabClose(UUID)
+    case tabLink(UUID)
     case tabResize(UUID, CanvasResizeHandle)
     case agentBody(UUID)
     case agentHeader(UUID)
@@ -74,6 +75,8 @@ enum CanvasHitTarget: Equatable {
 }
 
 enum CanvasInteractionMetrics {
+    static let minimumZoom: CGFloat = 0.25
+    static let maximumZoom: CGFloat = 2
     static let headerHeight: CGFloat = 34
     // The glyph stays visually small, while the interaction target is forgiving.
     static let closeTargetWidth: CGFloat = 44
@@ -108,20 +111,25 @@ enum CanvasInteractionHitTester {
         for node in snapshot.nodesFrontToBack {
             let frame = node.viewportRect
             guard frame.contains(point) else { continue }
+            let scale = max(0.5, snapshot.zoom)
+            let closeTargetWidth =
+                CanvasInteractionMetrics.closeTargetWidth * scale
 
             let closeRect = CGRect(
-                x: frame.maxX - CanvasInteractionMetrics.closeTargetWidth,
+                x: frame.maxX - closeTargetWidth,
                 y: frame.minY,
-                width: CanvasInteractionMetrics.closeTargetWidth,
-                height: min(CanvasInteractionMetrics.closeTargetWidth, frame.height)
+                width: closeTargetWidth,
+                height: min(closeTargetWidth, frame.height)
             )
             if closeRect.contains(point) {
                 let onResizeBorder = node.kind == .tab
                     && (
                         point.x >= frame.maxX
                             - CanvasInteractionMetrics.resizeEdgeTargetWidth
+                                * scale
                         || point.y <= frame.minY
                             + CanvasInteractionMetrics.resizeEdgeTargetWidth
+                                * scale
                     )
                 if !onResizeBorder {
                     return node.kind == .tab
@@ -131,7 +139,11 @@ enum CanvasInteractionHitTester {
             }
 
             if node.kind == .tab,
-               let handle = resizeHandle(at: point, in: frame) {
+               let handle = resizeHandle(
+                   at: point,
+                   in: frame,
+                   scale: scale
+               ) {
                 return .tabResize(node.id, handle)
             }
 
@@ -139,20 +151,42 @@ enum CanvasInteractionHitTester {
                 x: frame.minX,
                 y: frame.minY,
                 width: frame.width,
-                height: min(CanvasInteractionMetrics.headerHeight, frame.height)
+                height: min(
+                    CanvasInteractionMetrics.headerHeight * scale,
+                    frame.height
+                )
             )
             if headerRect.contains(point) {
+                if node.kind == .tab {
+                    let trailing = 5 * scale
+                    let closeWidth = 32 * scale
+                    let menuWidth = 26 * scale
+                    let linkWidth = 24 * scale
+                    let linkMaxX = frame.maxX
+                        - trailing
+                        - closeWidth
+                        - menuWidth
+                    let linkRect = CGRect(
+                        x: linkMaxX - linkWidth,
+                        y: frame.minY,
+                        width: linkWidth,
+                        height: headerRect.height
+                    ).insetBy(dx: -3 * scale, dy: 0)
+                    if linkRect.contains(point) {
+                        return .tabLink(node.id)
+                    }
+                }
                 let statusWidth = node.hasAgentStatus
-                    ? CanvasInteractionMetrics.agentStatusWidth
+                    ? CanvasInteractionMetrics.agentStatusWidth * scale
                     : 0
                 let controlsWidth: CGFloat
                 switch node.kind {
                 case .tab:
-                    controlsWidth = CanvasInteractionMetrics.closeTargetWidth
-                        + CanvasInteractionMetrics.tabToolbarWidth
+                    controlsWidth = closeTargetWidth
+                        + CanvasInteractionMetrics.tabToolbarWidth * scale
                         + statusWidth
                 case .agentPin:
-                    controlsWidth = CanvasInteractionMetrics.closeTargetWidth
+                    controlsWidth = closeTargetWidth
                         + statusWidth
                 }
                 if point.x >= frame.maxX - controlsWidth {
@@ -174,14 +208,15 @@ enum CanvasInteractionHitTester {
 
     static func resizeHandle(
         at point: CGPoint,
-        in frame: CGRect
+        in frame: CGRect,
+        scale: CGFloat = 1
     ) -> CanvasResizeHandle? {
         let corner = min(
-            CanvasInteractionMetrics.resizeCornerTargetSize,
+            CanvasInteractionMetrics.resizeCornerTargetSize * scale,
             frame.width / 3,
             frame.height / 3
         )
-        let edge = CanvasInteractionMetrics.resizeEdgeTargetWidth
+        let edge = CanvasInteractionMetrics.resizeEdgeTargetWidth * scale
         let nearLeft = point.x <= frame.minX + edge
         let nearRight = point.x >= frame.maxX - edge
         let nearTop = point.y <= frame.minY + edge
@@ -280,6 +315,9 @@ struct CanvasInteractionMonitor: NSViewRepresentable {
     let onCloseTab: (UUID) -> Void
     let onFocusAgent: (UUID) -> Void
     let onCloseAgent: (UUID) -> Void
+    let onSelectBackground: () -> Void
+    let onUpdateLink: (UUID, CGPoint, UUID?, Bool) -> Void
+    let onCreateLink: (UUID, UUID) -> Void
     let onMoveNode: (UUID, CanvasNodeFrame, Bool) -> Void
     let onResizeTab: (UUID, CanvasNodeFrame, Bool) -> Void
     let onPan: (CGSize, Bool) -> Void
@@ -313,6 +351,9 @@ struct CanvasInteractionMonitor: NSViewRepresentable {
         view.onCloseTab = onCloseTab
         view.onFocusAgent = onFocusAgent
         view.onCloseAgent = onCloseAgent
+        view.onSelectBackground = onSelectBackground
+        view.onUpdateLink = onUpdateLink
+        view.onCreateLink = onCreateLink
         view.onMoveNode = onMoveNode
         view.onResizeTab = onResizeTab
         view.onPan = onPan
@@ -329,6 +370,11 @@ final class CanvasInteractionMonitorView: NSView {
     var onCloseTab: (UUID) -> Void = { _ in }
     var onFocusAgent: (UUID) -> Void = { _ in }
     var onCloseAgent: (UUID) -> Void = { _ in }
+    var onSelectBackground: () -> Void = {}
+    var onUpdateLink: (UUID, CGPoint, UUID?, Bool) -> Void = {
+        _, _, _, _ in
+    }
+    var onCreateLink: (UUID, UUID) -> Void = { _, _ in }
     var onMoveNode: (UUID, CanvasNodeFrame, Bool) -> Void = { _, _, _ in }
     var onResizeTab: (UUID, CanvasNodeFrame, Bool) -> Void = { _, _, _ in }
     var onPan: (CGSize, Bool) -> Void = { _, _ in }
@@ -340,6 +386,7 @@ final class CanvasInteractionMonitorView: NSView {
         case moveAgent
         case closeTab
         case closeAgent
+        case linkTab
         case pan
     }
 
@@ -372,6 +419,8 @@ final class CanvasInteractionMonitorView: NSView {
                 .otherMouseDown,
                 .otherMouseDragged,
                 .otherMouseUp,
+                .mouseMoved,
+                .cursorUpdate,
                 .scrollWheel,
                 .magnify
             ]
@@ -390,6 +439,7 @@ final class CanvasInteractionMonitorView: NSView {
         }
         eventMonitor = nil
         operation = nil
+        NSCursor.arrow.set()
     }
 
     func handleForTesting(_ event: NSEvent) -> NSEvent? {
@@ -400,6 +450,7 @@ final class CanvasInteractionMonitorView: NSView {
         guard let window, event.window === window else { return event }
         let location = convert(event.locationInWindow, from: nil)
         guard bounds.contains(location) else {
+            NSCursor.arrow.set()
             return event
         }
 
@@ -428,6 +479,8 @@ final class CanvasInteractionMonitorView: NSView {
             return dragPointer(to: location) ? nil : event
         case .otherMouseUp where event.buttonNumber == 2:
             return endPointer(at: location) ? nil : event
+        case .mouseMoved, .cursorUpdate:
+            return updateCursor(at: location) ? nil : event
         case .scrollWheel:
             return handleScroll(event, at: location)
         case .magnify:
@@ -509,6 +562,7 @@ final class CanvasInteractionMonitorView: NSView {
                 resizeHandle: nil,
                 clickCount: clickCount
             )
+            NSCursor.closedHand.set()
             return true
         case let .tabClose(id):
             operation = Operation(
@@ -520,6 +574,18 @@ final class CanvasInteractionMonitorView: NSView {
                 resizeHandle: nil,
                 clickCount: clickCount
             )
+            return true
+        case let .tabLink(id):
+            operation = Operation(
+                kind: .linkTab,
+                id: id,
+                startPoint: location,
+                lastPoint: location,
+                originalFrame: nil,
+                resizeHandle: nil,
+                clickCount: clickCount
+            )
+            NSCursor.crosshair.set()
             return true
         case let .tabResize(id, handle):
             guard let node = node(id) else { return false }
@@ -533,6 +599,7 @@ final class CanvasInteractionMonitorView: NSView {
                 resizeHandle: handle,
                 clickCount: clickCount
             )
+            setResizeCursor(handle)
             return true
         case let .agentHeader(id):
             guard let node = node(id) else { return false }
@@ -545,6 +612,7 @@ final class CanvasInteractionMonitorView: NSView {
                 resizeHandle: nil,
                 clickCount: clickCount
             )
+            NSCursor.closedHand.set()
             return true
         case let .agentClose(id):
             operation = Operation(
@@ -558,6 +626,7 @@ final class CanvasInteractionMonitorView: NSView {
             )
             return true
         case .background:
+            onSelectBackground()
             operation = Operation(
                 kind: .pan,
                 id: nil,
@@ -567,6 +636,7 @@ final class CanvasInteractionMonitorView: NSView {
                 resizeHandle: nil,
                 clickCount: clickCount
             )
+            NSCursor.closedHand.set()
             return false
         case .tabControl, .agentBody, .agentControl:
             return false
@@ -579,7 +649,7 @@ final class CanvasInteractionMonitorView: NSView {
             location.x - operation.startPoint.x,
             location.y - operation.startPoint.y
         )
-        if totalDistance >= 2 {
+        if totalDistance >= 4 {
             operation.didDrag = true
         }
 
@@ -632,6 +702,22 @@ final class CanvasInteractionMonitorView: NSView {
             operation.lastPoint = location
             self.operation = operation
             return true
+        case .linkTab:
+            guard let id = operation.id else {
+                self.operation = nil
+                return false
+            }
+            if operation.didDrag {
+                onUpdateLink(
+                    id,
+                    location,
+                    linkTarget(at: location, excluding: id),
+                    false
+                )
+            }
+            operation.lastPoint = location
+            self.operation = operation
+            return true
         case .closeTab, .closeAgent:
             return true
         }
@@ -640,6 +726,7 @@ final class CanvasInteractionMonitorView: NSView {
     private func endPointer(at location: CGPoint) -> Bool {
         guard let operation else { return false }
         self.operation = nil
+        defer { updateCursor(at: location) }
 
         switch operation.kind {
         case .moveTab:
@@ -709,6 +796,14 @@ final class CanvasInteractionMonitorView: NSView {
                 onCloseAgent(id)
             }
             return true
+        case .linkTab:
+            guard let id = operation.id else { return true }
+            let targetID = linkTarget(at: location, excluding: id)
+            if operation.didDrag, let targetID {
+                onCreateLink(id, targetID)
+            }
+            onUpdateLink(id, location, targetID, true)
+            return true
         case .pan:
             if operation.didDrag {
                 onPan(.zero, true)
@@ -775,6 +870,67 @@ final class CanvasInteractionMonitorView: NSView {
 
     private func node(_ id: UUID) -> CanvasInteractionNode? {
         snapshot.nodesFrontToBack.first { $0.id == id }
+    }
+
+    private func linkTarget(
+        at location: CGPoint,
+        excluding sourceID: UUID
+    ) -> UUID? {
+        snapshot.nodesFrontToBack.first {
+            $0.kind == .tab
+                && $0.id != sourceID
+                && $0.viewportRect.contains(location)
+        }?.id
+    }
+
+    @discardableResult
+    func updateCursor(at location: CGPoint) -> Bool {
+        if let operation {
+            switch operation.kind {
+            case .moveTab, .moveAgent, .pan:
+                NSCursor.closedHand.set()
+                return true
+            case .resizeTab:
+                setResizeCursor(operation.resizeHandle)
+                return true
+            case .linkTab:
+                NSCursor.crosshair.set()
+                return true
+            case .closeTab, .closeAgent:
+                NSCursor.arrow.set()
+                return false
+            }
+        }
+        switch CanvasInteractionHitTester.target(
+            at: location,
+            snapshot: snapshot
+        ) {
+        case .tabHeader, .agentHeader, .background:
+            NSCursor.openHand.set()
+            return true
+        case .tabLink:
+            NSCursor.crosshair.set()
+            return true
+        case let .tabResize(_, handle):
+            setResizeCursor(handle)
+            return true
+        default:
+            NSCursor.arrow.set()
+            return false
+        }
+    }
+
+    private func setResizeCursor(_ handle: CanvasResizeHandle?) {
+        switch handle {
+        case .left, .right:
+            NSCursor.resizeLeftRight.set()
+        case .top, .bottom:
+            NSCursor.resizeUpDown.set()
+        case .topLeft, .topRight, .bottomLeft, .bottomRight:
+            NSCursor.crosshair.set()
+        case nil:
+            NSCursor.arrow.set()
+        }
     }
 
     private static func isGestureEnded(_ event: NSEvent) -> Bool {

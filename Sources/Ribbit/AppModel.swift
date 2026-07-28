@@ -12,7 +12,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var canvasCamera: CanvasCamera = .initial
     @Published private(set) var contextEdges: [ContextEdge] = []
     @Published private(set) var externalAgentPins: [ExternalAgentPin] = []
-    @Published private(set) var canvasGroups: [CanvasGroup] = []
     @Published var selectedContextEdgeID: UUID?
     let agentMonitor: RibbitAgentMonitor
     private let agentNotifier = RibbitAgentNotifier()
@@ -27,7 +26,6 @@ final class AppModel: ObservableObject {
     private var canvasCameras: [String: CanvasCamera] = [:]
     private var contextEdgesByWorkspace: [String: [ContextEdge]] = [:]
     private var externalAgentPinsByWorkspace: [String: [ExternalAgentPin]] = [:]
-    private var canvasGroupsByWorkspace: [String: [CanvasGroup]] = [:]
     private var loadedWorkspaceKeys = Set<String>()
 
     init(
@@ -186,51 +184,8 @@ final class AppModel: ObservableObject {
     }
 
     func unpinAgent(_ pin: ExternalAgentPin) {
-        removeNodeFromCanvasGroup(pin.id)
         externalAgentPins.removeAll { $0.id == pin.id }
         externalAgentPinsByWorkspace[workspaceKey] = externalAgentPins
-        persistCurrentWorkspace()
-    }
-
-    func groupNode(_ sourceID: UUID, with targetID: UUID) {
-        guard sourceID != targetID else { return }
-        let related = canvasGroups.filter {
-            $0.nodeIDs.contains(sourceID) || $0.nodeIDs.contains(targetID)
-        }
-        var nodeIDs: [UUID] = []
-        for nodeID in related.flatMap(\.nodeIDs) + [sourceID, targetID]
-        where !nodeIDs.contains(nodeID) {
-            nodeIDs.append(nodeID)
-        }
-        canvasGroups.removeAll { group in
-            related.contains { $0.id == group.id }
-        }
-        canvasGroups.append(CanvasGroup(
-            name: related.first?.name ?? "group \(canvasGroups.count + 1)",
-            nodeIDs: nodeIDs
-        ))
-        canvasGroupsByWorkspace[workspaceKey] = canvasGroups
-        persistCurrentWorkspace()
-    }
-
-    func removeNodeFromCanvasGroup(_ nodeID: UUID) {
-        var changed = false
-        for index in canvasGroups.indices.reversed() where
-            canvasGroups[index].nodeIDs.contains(nodeID) {
-            canvasGroups[index].nodeIDs.removeAll { $0 == nodeID }
-            if canvasGroups[index].nodeIDs.count < 2 {
-                canvasGroups.remove(at: index)
-            }
-            changed = true
-        }
-        guard changed else { return }
-        canvasGroupsByWorkspace[workspaceKey] = canvasGroups
-        persistCurrentWorkspace()
-    }
-
-    func removeCanvasGroup(_ group: CanvasGroup) {
-        canvasGroups.removeAll { $0.id == group.id }
-        canvasGroupsByWorkspace[workspaceKey] = canvasGroups
         persistCurrentWorkspace()
     }
 
@@ -399,6 +354,7 @@ final class AppModel: ObservableObject {
 
     func selectTab(_ tab: RibbitTab) {
         guard tab.projectID == selectedProjectID else { return }
+        guard selectedTabID != tab.id else { return }
         selectedTabID = tab.id
         selectedTabIDsByWorkspace[workspaceKey] = tab.id
         persistCurrentWorkspace()
@@ -479,7 +435,10 @@ final class AppModel: ObservableObject {
         canvasCamera = CanvasCamera(
             x: camera.x,
             y: camera.y,
-            zoom: min(1.5, max(0.5, camera.zoom))
+            zoom: min(
+                CanvasInteractionMetrics.maximumZoom,
+                max(CanvasInteractionMetrics.minimumZoom, camera.zoom)
+            )
         )
         canvasCameras[workspaceKey] = canvasCamera
         persistCurrentWorkspace()
@@ -533,7 +492,6 @@ final class AppModel: ObservableObject {
         }
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         removeContextLinks(for: tab)
-        removeNodeFromCanvasGroup(tab.id)
         tab.terminalSession?.terminate()
         tabs.remove(at: index)
         if selectedTabID == tab.id {
@@ -875,7 +833,6 @@ final class AppModel: ObservableObject {
         canvasCamera = canvasCameras[workspaceKey] ?? .initial
         contextEdges = contextEdgesByWorkspace[workspaceKey] ?? []
         externalAgentPins = externalAgentPinsByWorkspace[workspaceKey] ?? []
-        canvasGroups = canvasGroupsByWorkspace[workspaceKey] ?? []
         selectedContextEdgeID = nil
         restoreSelectedTab()
     }
@@ -939,7 +896,6 @@ final class AppModel: ObservableObject {
             canvasCameras[key] = .initial
             contextEdgesByWorkspace[key] = []
             externalAgentPinsByWorkspace[key] = []
-            canvasGroupsByWorkspace[key] = []
             return
         }
 
@@ -947,7 +903,6 @@ final class AppModel: ObservableObject {
         canvasCameras[key] = document.camera
         contextEdgesByWorkspace[key] = document.contextEdges
         externalAgentPinsByWorkspace[key] = document.externalAgentPins
-        canvasGroupsByWorkspace[key] = document.canvasGroups
         selectedTabIDsByWorkspace[key] = document.selectedTabID
 
         for record in document.tabs {
@@ -1028,8 +983,7 @@ final class AppModel: ObservableObject {
             camera: canvasCameras[key] ?? .initial,
             tabs: records,
             contextEdges: contextEdgesByWorkspace[key] ?? [],
-            externalAgentPins: externalAgentPinsByWorkspace[key] ?? [],
-            canvasGroups: canvasGroupsByWorkspace[key] ?? []
+            externalAgentPins: externalAgentPinsByWorkspace[key] ?? []
         )
 
         do {

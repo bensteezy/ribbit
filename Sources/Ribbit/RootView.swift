@@ -29,7 +29,23 @@ struct RootView: View {
                     .frame(height: metrics.tabBarHeight)
                     .background(RibbitTheme.surface)
                     Divider().overlay(RibbitTheme.rule)
-                    WorkspaceCanvas(model: model, settings: settings)
+                    WorkspaceCanvas(
+                        model: model,
+                        settings: settings,
+                        viewportSize: CGSize(
+                            width: max(
+                                1,
+                                proxy.size.width
+                                    - metrics.projectRailWidth
+                                    - metrics.inspectorWidth
+                                    - 2
+                            ),
+                            height: max(
+                                1,
+                                proxy.size.height - metrics.tabBarHeight - 1
+                            )
+                        )
+                    )
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -431,11 +447,16 @@ private struct TabStrip: View {
 private struct WorkspaceCanvas: View {
     @ObservedObject var model: AppModel
     @ObservedObject var settings: AppSettings
+    let viewportSize: CGSize
 
     var body: some View {
         Group {
             if model.workspaceMode == .canvas {
-                TerminalCanvasWorkspace(model: model, settings: settings)
+                TerminalCanvasWorkspace(
+                    model: model,
+                    settings: settings,
+                    viewportSize: viewportSize
+                )
                     .id(model.selectedProjectID?.uuidString ?? "base")
             } else if let tab = model.selectedTab {
                 switch tab.kind {
